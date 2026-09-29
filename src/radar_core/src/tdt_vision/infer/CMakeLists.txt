@@ -9,6 +9,11 @@ set(CMAKE_CXX_STANDARD 17)
 SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-deprecated-declarations")
 # TODO(Call for PR): make cmake compatible with Windows
 find_package(CUDA)
+set(CMAKE_CUDA_ARCHITECTURES 120)
+set(CUDA_NVCC_FLAGS ${CUDA_NVCC_FLAGS} 
+    -gencode arch=compute_120,code=sm_120
+    -gencode arch=compute_120,code=compute_120
+)
 include(../cmake/modules/libnvinferConfig.cmake)
 
 # include and link dirs of cuda and tensorrt, you need adapt them if yours are different

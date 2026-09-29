@@ -61,7 +61,7 @@ cv::Rect getSafeRect(cv::Mat& image, cv::Rect& rect)
 Detect::Detect(const rclcpp::NodeOptions& node_options)
     : Node("radar_detect_node", node_options)
 {
-    cv::namedWindow("detect", cv::WINDOW_NORMAL);
+    //cv::namedWindow("detect", cv::WINDOW_NORMAL);
 
     std::cout << "Checking CUDA with nvidia-smi...\n";
     if (system("nvidia-smi") == 0) {
@@ -325,7 +325,7 @@ void Detect::callback(const std::shared_ptr<sensor_msgs::msg::Image> msg)
               << std::endl;
     cv::Mat final_img;
     cv::resize(img, final_img, cv::Size(1536, 1125));
-    cv::imshow("detect", final_img);
+    //cv::imshow("detect", final_img);
     auto key = cv::waitKey(1);
     if (key == 'r') {
         debug = !debug;

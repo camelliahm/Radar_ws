@@ -2,12 +2,13 @@ import argparse
 import subprocess
 
 def run_trtexec(onnx_path, save_engine_path, min_batch, opt_batch, max_batch, input_name,shape):
-    command = ["/usr/src/tensorrt/bin/trtexec",
+    command = ["/usr/bin/trtexec",
                "--onnx=" + onnx_path,
                "--saveEngine=" + save_engine_path,
                "--minShapes=" + input_name + ":" + min_batch + "x3x" +shape,
                "--optShapes=" + input_name + ":" + opt_batch + "x3x" +shape,
-               "--maxShapes=" + input_name + ":" + max_batch + "x3x" +shape]
+               "--maxShapes=" + input_name + ":" + max_batch + "x3x" +shape,
+               "--memPoolSize=workspace:2G"]
     subprocess.run(command)
 
 if __name__ == "__main__":

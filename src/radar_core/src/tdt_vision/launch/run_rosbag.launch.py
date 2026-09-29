@@ -25,7 +25,7 @@ def generate_launch_description():
             parameters=[
                 {
                     "rosbag_file":
-                    "/home/mozihe/2025/T-DT_Radar/merged_bag_1.db3"
+                    "/home/camelliahm/radar_ws/bags/merged_bag_1.db3"
                 }
             ],
             extra_arguments=[{"use_intra_process_comms": True}],
