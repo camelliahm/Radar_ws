@@ -1,0 +1,683 @@
+radar_vision 是整个雷达站的视觉处理包，核心职责可以概括为：
+
+  相机图像
+     │
+     ▼
+  Detect：车辆检测 → 装甲板检测 → 编号分类/颜色判断
+     │ detect_result（图像像素坐标）
+     ▼
+  Resolve：结合相机内外参和场地高度，将像素坐标映射到场地坐标
+     │ resolve_result / camera_point3D
+     ▼
+  雷视融合、地图显示、哨兵通信等下游节点
+
+  此外还有两个支撑模块：
+
+  - Calibrate：交互式选择场地点，通过 PnP 求相机外参；
+  - infer：封装 TensorRT、CUDA、YOLO 和分类网络推理。
+
+  项目当前实际注册了三个 ROS 2 组件：
+
+   组件                    可执行程序              主要作用
+  ━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━━━━━
+   radar_core::Detect       radar_detect_node       图像目标识别
+  ──────────────────────  ──────────────────────  ────────────────────────
+   radar_core::Resolve      radar_resolve_node      图像坐标到场地坐标转换
+  ──────────────────────  ──────────────────────  ────────────────────────
+   radar_core::Calibrate    radar_calibrate_node    相机外参标定
+
+  ## 一、顶层文件
+
+  ### src/radar_core/src/radar_vision/CMakeLists.txt
+
+  整个 radar_vision 包的主构建文件。
+
+  主要工作：
+
+  - 使用 C++20；
+  - 固定 CUDA 编译器为 /usr/local/cuda/bin/nvcc；
+  - 加载 ROS 2、OpenCV、PCL、CUDA、TensorRT 等依赖；
+  - 编译 utils 和 infer 子库；
+  - 编译并注册三个 ROS 2 组件：
+      - radar_detect
+      - radar_resolve
+      - radar_calibrate
+
+  - 安装 launch/ 目录。
+
+  其中 Detect 会链接：
+
+  utils + infer + TensorRT + CUDA Runtime + nvonnxparser + fmt + PCL
+
+  ### src/radar_core/src/radar_vision/package.xml
+
+  ROS 2 包元数据和依赖声明。
+
+  声明了：
+
+  - rclcpp、rclcpp_components
+  - vision_interface
+  - geometry_msgs、std_msgs
+  - cv_bridge、image_transport
+  - tf2
+  - PCL 相关依赖
+  - OpenCV
+
+  其中有一些历史依赖，如 roborts_utils、perception_interface，当前源码中未看到明显使用，可能是旧版本遗留。
+
+  ### src/radar_core/src/radar_vision/cmake/modules/libnvinferConfig.cmake
+
+  自定义 TensorRT 查找模块。
+
+  负责搜索：
+
+  - NvInfer.h
+  - libnvinfer.so
+
+  并设置：
+
+  - nvinfer_FOUND
+  - nvinfer_INCLUDE_DIRS
+  - nvinfer_LIBRARIES
+
+  它只是查找 TensorRT，本身不进行推理。
+
+  ———
+
+  # 二、detect：三级视觉识别
+
+  ## src/radar_core/src/radar_vision/detect/include/detect.h
+
+  声明 radar_core::Detect ROS 2 节点。
+
+  节点持有三套推理器：
+
+  yolo          // 一级：车辆检测
+  armor_yolo    // 二级：装甲板检测
+  classifier    // 三级：装甲板编号分类
+
+  Car 类用于保存单辆车的中间结果：
+
+  - car、car_rect：车辆检测框；
+  - armors：车辆内部的装甲板框；
+  - number：机器人编号；
+  - color：红蓝颜色；
+  - center：最终选中装甲板的像素中心。
+
+  主要 ROS 接口：
+
+   类型    话题             消息
+  ━━━━━━  ━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   订阅    camera_image     sensor_msgs/Image
+  ──────  ───────────────  ───────────────────────────────
+   发布    detect_result    vision_interface/DetectResult
+
+  头文件还声明了 compressed_image_sub，但当前 detect.cpp 中并没有创建这个订阅。
+
+  ## src/radar_core/src/radar_vision/detect/src/detect.cpp
+
+  实现完整的三级检测链路。
+
+  ### 1. 初始化
+
+  构造函数会：
+
+  1. 调用 nvidia-smi 检查 NVIDIA GPU；
+  2. 从 ./config/detect_params.yaml 读取三个 TensorRT engine 路径；
+  3. 如果 engine 不存在，调用 src/utils/onnx2trt.py 转换 ONNX；
+  4. 加载三个模型；
+  5. 订阅 camera_image；
+  6. 创建 detect_result 发布器。
+
+  三个模型分别是：
+
+   模型                输入尺寸    用途
+  ━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━
+   RM2025.onnx        1280×1280    检测整车
+  ─────────────────  ───────────  ────────────────────
+   armor_yolo.onnx      192×192    检测车辆内部装甲板
+  ─────────────────  ───────────  ────────────────────
+   classify.onnx        224×224    判断装甲板编号
+
+  ### 2. 一级车辆检测
+
+  对整张图执行：
+
+  result = yolo->forward(image);
+
+  只保留类别 0 和 1，并限制最多处理 12 辆车。
+
+  ### 3. 二级装甲板检测
+
+  先裁剪每辆车的 ROI，再批量调用：
+
+  armor_yolo->forwards(images);
+
+  装甲板坐标最初相对于车辆 ROI，后续会加上车辆框的偏移，恢复成整幅图像坐标。
+
+  ### 4. 三级编号分类
+
+  把每个装甲板裁剪出来，批量调用：
+
+  classifier->forwards(armor_images);
+
+  分类结果写回每个装甲板的 class_label。
+
+  当前逻辑会排除类别 0 和 5，然后选择置信度最高的装甲板作为该车辆的最终编号来源。
+
+  ### 5. 判断红蓝颜色
+
+  getColor() 比较装甲板图像的蓝色通道和红色通道：
+
+  - 蓝色更强：返回 0；
+  - 红色更强：返回 2。
+
+  最终将装甲板中心写入：
+
+  blue_x[number - 1]
+  blue_y[number - 1]
+
+  red_x[number - 1]
+  red_y[number - 1]
+
+  因此 DetectResult 在这里表达的是：
+
+  > 不同编号机器人在相机图像中的像素中心坐标。
+
+  ### 辅助函数
+
+  - getColor()：判断红蓝颜色；
+  - isRectInside()：判断一个矩形是否完全位于另一个矩形内；
+  - isBoxInside()：YOLO Box 版本的包含判断，目前没有实际调用；
+  - getSafeRect()：裁剪检测框，防止 ROI 超出图像边界。
+
+  ———
+
+  # 三、resolve：像素坐标到场地坐标
+
+  ## src/radar_core/src/radar_vision/resolve/include/resolve.h
+
+  声明 radar_core::Resolve 节点。
+
+  主要 ROS 接口：
+
+   类型    话题              消息                             功能
+  ━━━━━━  ━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━━━━━━━
+   订阅    camera_point2D    geometry_msgs/Vector3            手动输入单个像素点
+  ──────  ────────────────  ───────────────────────────────  ──────────────────────────
+   订阅    detect_result     vision_interface/DetectResult    接收检测像素坐标
+  ──────  ────────────────  ───────────────────────────────  ──────────────────────────
+   订阅    match_info        vision_interface/MatchInfo       比赛时间、血量、标记信息
+  ──────  ────────────────  ───────────────────────────────  ──────────────────────────
+   发布    camera_point3D    sensor_msgs/PointCloud2          场地坐标点云
+  ──────  ────────────────  ───────────────────────────────  ──────────────────────────
+   发布    resolve_result    vision_interface/DetectResult    转换后的场地坐标
+
+  map_car 是一个简单的数据结构，保存 x、y 和编号，但当前实现没有使用它。
+
+  ## src/radar_core/src/radar_vision/resolve/src/resolve.cpp
+
+  负责将检测到的像素中心转换为场地坐标。
+
+  ### 单点转换
+
+  收到 camera_point2D 后：
+
+  像素点 → parser::parse() → 场地坐标 → PointCloud2
+
+  输出点云坐标系为：
+
+  frame_id = "rm_frame"
+
+  ### 检测结果转换
+
+  收到 detect_result 后，会遍历红蓝双方各 6 个编号：
+
+  1. 判断该编号是否存在有效像素坐标；
+  2. 调用 parser_->parse() 转换；
+  3. 写入新的 DetectResult；
+  4. 同时生成带颜色的 PCL 点：
+      - 蓝方：蓝色；
+      - 红方：红色；
+
+  5. 发布：
+      - resolve_result
+      - camera_point3D
+
+  这里复用了 DetectResult 消息：
+
+  - Detect 发布时，x/y 表示图像像素；
+  - Resolve 发布时，x/y 表示场地坐标。
+
+  需要通过话题名区分两种语义。
+
+  ### match_info
+
+  MatchInfoCallback() 会保存：
+
+  - 6 个标记；
+  - 16 个机器人血量；
+  - 比赛剩余时间。
+
+  但当前这些数据只保存到成员变量，没有参与坐标解算或结果发布。
+
+  ### 地图绘制
+
+  代码会把机器人绘制到 RM2025.png 的副本上，但目前绘制后的 Map_clone 没有显示、保存或发布，因此这一部分暂时没有外部效果。
+
+  ———
+
+  # 四、utils：投影和场地高度解析
+
+  ## src/radar_core/src/radar_vision/utils/include/radar_utils.h
+
+  包含两个主要类。
+
+  ### Parser_Points
+
+  表示一个特殊场地区域，例如：
+
+  - 中央区域；
+  - 左右道路；
+    -能量机关区域；
+
+  - 双方堡垒。
+
+  保存：
+
+  - 区域的三维顶点 Points_3D；
+  - 投影到图像后的二维多边形 Points_2D；
+  - 该区域的地面高度 Height。
+
+  主要方法：
+
+  - ReadPoints()：从配置中读取三维区域顶点；
+  - World2Camera()：把三维顶点投影到相机图像；
+  - return_height()：判断像素点是否落在区域内；
+  - Update()：重新加载外参并更新投影。
+
+  ### parser
+
+  封装完整的像素到世界坐标转换。
+
+  主要方法：
+
+  - parse()：执行坐标转换；
+  - get_height()：根据像素所在区域选择地面高度；
+  - get_2d()：在指定高度平面上执行透视映射；
+  - draw_ui()：在标定画面上绘制场地区域；
+  - Change_Matrix()：标定完成后重新加载外参。
+
+  ## src/radar_core/src/radar_vision/utils/src/radar_utils.cpp
+
+  实现具体坐标解算。
+
+  初始化时读取：
+
+  ./config/out_matrix.yaml       相机外参
+  ./config/camera_params.yaml    相机内参和畸变
+  ./config/RM2025_Points.yaml    场地区域三维点
+
+  注册了以下特殊区域：
+
+   区域              使用高度
+  ━━━━━━━━━━━━━━━━  ━━━━━━━━━━
+   Middle_Line          0.3 m
+  ────────────────  ──────────
+   Left_Road            0.2 m
+  ────────────────  ──────────
+   Right_Road           0.2 m
+  ────────────────  ──────────
+   Enemy_Buff           0.6 m
+  ────────────────  ──────────
+   Self_Fortress       0.15 m
+  ────────────────  ──────────
+   Enemy_Fortress      0.15 m
+
+  基本转换方式是：
+
+  1. 根据内外参，把场地区域边界投影到图像；
+  2. 判断目标像素落在哪个区域；
+  3. 得到该区域对应的地面高度；
+  4. 加上装甲板高度 0.15 m；
+  5. 在这个高度平面上构造四个世界点；
+  6. 将四个世界点投影成图像点；
+  7. 计算图像平面到世界平面的透视变换；
+  8. 用 perspectiveTransform() 得到场地二维坐标。
+
+  这是一种“分区域估计高度 + 单应性映射”的解算方式，不是直接通过深度传感器获取距离。
+
+  ## src/radar_core/src/radar_vision/utils/CMakeLists.txt
+
+  把 utils/src/*.cpp 编译为 utils 库，并链接 OpenCV。
+
+  ———
+
+  # 五、calibrate：相机外参标定
+
+  ## src/radar_core/src/radar_vision/calibrate/include/calibrate.h
+
+  声明 radar_core::Calibrate 节点。
+
+  预设了五个场地三维标定点：
+
+  - 己方堡垒；
+  - 己方高地/塔；
+  - 敌方基地；
+  - 敌方高地/塔；
+  - 敌方高地区域。
+
+  主要订阅：
+
+   话题                消息
+  ━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   camera_image        sensor_msgs/Image
+  ──────────────────  ─────────────────────────────
+   compressed_image    sensor_msgs/CompressedImage
+
+  还保存：
+
+  - 相机内参；
+  - 畸变系数；
+  - 用户选取的二维像素点；
+  - 求解出的旋转向量和平移向量。
+
+  ## src/radar_core/src/radar_vision/calibrate/src/calibrate.cpp
+
+  提供 OpenCV 交互式标定界面。
+
+  操作流程：
+
+  1. 启动后显示相机画面和场地区域投影；
+  2. 按 Enter 进入标定状态；
+  3. 鼠标点击标定点；
+  4. 用 W/A/S/D 微调选点；
+  5. 按 N 确认当前点；
+  6. 收集满 5 个二维点后调用 solvePnP()；
+  7. 将结果写入：
+
+  ./config/out_matrix.yaml
+
+  写出的内容：
+
+  world_rvec: ...
+  world_tvec: ...
+
+  之后调用 parser_->Change_Matrix()，重新加载外参并更新场地区域投影。
+
+  使用的 PnP 方法为：
+
+  cv::SOLVEPNP_EPNP
+
+  这个节点会覆盖当前外参文件，因此运行标定前需要备份已有结果。
+
+  ———
+
+  # 六、infer：TensorRT/CUDA 推理层
+
+  infer 是底层推理库，不是 ROS 节点。Detect 通过它加载和执行三个模型。
+
+  ## src/radar_core/src/radar_vision/infer/CMakeLists.txt
+
+  负责：
+
+  - 编译所有 .cpp 和 .cu；
+  - 使用 C++17；
+  - 查找 CUDA、TensorRT 和 OpenCV；
+  - 生成 infer 库；
+  - 链接 nvinfer、cudart、nvonnxparser；
+  - 设置 GPU 架构为 sm_120。
+
+  sm_120 必须和实际 GPU 匹配，否则 CUDA 编译或运行可能失败。
+
+  ## src/radar_core/src/radar_vision/infer/include/BaseInfer.hpp
+
+  定义模型无关的通用推理接口：
+
+  - Image：保存 BGR 数据指针、宽度和高度；
+  - Infer<T>：统一的单张和批量推理接口；
+  - Norm：图像归一化配置；
+  - AffineMatrix：图像尺寸变换矩阵。
+
+  ## src/radar_core/src/radar_vision/infer/src/BaseInfer.cpp
+
+  实现：
+
+  - 均值/方差归一化；
+  - alpha/beta 线性归一化；
+  - 不归一化模式；
+  - 输入图像到网络输入尺寸之间的仿射矩阵计算。
+
+  ## src/radar_core/src/radar_vision/infer/include/InferTool.hpp
+
+  声明 CUDA 图像预处理函数和错误检查宏：
+
+  - checkRuntime
+  - checkKernel
+  - warp_affine_bilinear_and_normalize_plane()
+
+  ## src/radar_core/src/radar_vision/infer/src/InferTool.cu
+
+  实现 CUDA 图像预处理 kernel，一次完成：
+
+  - 仿射变换；
+  - 双线性插值；
+  - 越界填充；
+  - BGR/RGB 通道调整；
+  - 像素归一化；
+  - HWC 到 CHW 排列。
+
+  这是 YOLO 和分类模型共同使用的前处理。
+
+  ## src/radar_core/src/radar_vision/infer/include/NvidiaInterface.hpp
+
+  封装 TensorRT 和 CUDA 的底层接口：
+
+  - Timer：CUDA 执行计时；
+  - BaseMemory：CPU/GPU/统一内存管理；
+  - Memory<T>：类型化内存封装；
+  - trt::Infer：TensorRT engine 抽象接口。
+
+  支持查询：
+
+  - binding 数量和索引；
+  - 输入输出形状；
+    -动态尺寸；
+
+  - 数据类型；
+    -输入输出张量属性。
+
+  ## src/radar_core/src/radar_vision/infer/src/NvidiaInterface.cu
+
+  实现 TensorRT engine 的实际加载和执行：
+
+  1. 从 .engine 文件读取序列化数据；
+  2. 创建 TensorRT Runtime；
+  3. 反序列化 CUDA Engine；
+  4. 创建 Execution Context；
+  5. 设置张量地址和动态输入尺寸；
+  6. 通过 enqueueV3() 执行推理；
+  7. 管理 CUDA stream、event 和内存。
+
+  ## src/radar_core/src/radar_vision/infer/include/yolos.hpp
+
+  声明 YOLO 推理接口。
+
+  支持的模型类型包括：
+
+  - YOLOv3
+  - YOLOv5
+  - YOLOX
+  - YOLOv7
+  - YOLOv8
+  - YOLOv8-Seg
+  - YOLOv5-Face
+
+  Box 保存：
+
+  - 检测框；
+  - 置信度；
+  - 类别；
+  - 可选分割图；
+  - 可选关键点。
+
+  ## src/radar_core/src/radar_vision/infer/src/yolo.cu
+
+  实现 YOLO 全流程：
+
+  - 批量图像预处理；
+  - TensorRT 推理；
+  - YOLOv5/v8 等输出解码；
+  - 置信度过滤；
+  - IoU 计算；
+  - CUDA NMS；
+  - 坐标从网络输入映射回原图；
+  - 可选实例分割 mask 解码；
+  - 输出 BoxArray。
+
+  当前 Detect 加载的是 yolo::Type::V8。
+
+  ## src/radar_core/src/radar_vision/infer/include/classify.hpp
+
+  声明分类模型接口。
+
+  当前只定义：
+
+  Type::densenet121
+
+  输出是一个整数类别编号。
+
+  ## src/radar_core/src/radar_vision/infer/src/classify.cu
+
+  实现装甲板分类：
+
+  - 批量图像预处理；
+  - TensorRT 推理；
+  - 读取每张图的分类输出；
+  - 选择最大概率对应的类别；
+  - 返回 vector<int>。
+
+  ## src/radar_core/src/radar_vision/infer/include/logging.h
+
+  TensorRT 日志辅助代码。
+
+  提供：
+
+  - TensorRT ILogger 实现；
+  - VERBOSE/INFO/WARN/ERROR/FATAL 等日志级别；
+  - 流式日志输出；
+  - TensorRT 构建和运行错误信息格式化。
+
+  ———
+
+  # 七、launch：启动组合
+
+  ## src/radar_core/src/radar_vision/launch/run_rosbag.launch.py
+
+  用于 rosbag 回放视觉链路。
+
+  同一组件容器内启动：
+
+  - RosbagPlayer
+  - radar_core::Detect
+  - radar_core::Resolve
+  - Foxglove Bridge
+
+  并包含 map_server_launch.py。
+
+  当前 rosbag 路径硬编码为：
+
+  /home/camelliahm/radar_ws/bags/merged_bag_1.db3
+
+  换机器或换数据包时需要修改。
+
+  ## src/radar_core/src/radar_vision/launch/calib_rosbag.launch.py
+
+  使用 rosbag 图像进行相机标定。
+
+  启动：
+
+  - RosbagPlayer
+  - radar_core::Calibrate
+
+  同样包含原作者机器的硬编码 rosbag 路径。
+
+  ## src/radar_core/src/radar_vision/launch/calibrate_radar.launch.py
+
+  设计用途是使用实时相机进行标定。
+
+  尝试启动：
+
+  - radar_vision::NodeCamera
+  - radar_core::Calibrate
+
+  不过当前工作空间的 radar_vision 中并不存在 NodeCamera。实际相机节点位于独立的 hik_camera 包中，因此这个 launch 文件不能直接使用。
+
+  ## src/radar_core/src/radar_vision/launch/radar.launch.py
+
+  设计为完整视觉雷达启动文件，尝试启动：
+
+  - 相机；
+  - Detect；
+  - Resolve；
+  - Foxglove；
+  - 调试节点；
+  - rosbag 录制节点；
+  - 地图服务器。
+
+  但当前引用了工作空间中未提供或插件名不匹配的组件：
+
+  - radar_vision::NodeCamera
+  - radar_vision::NodeDebug
+  - databag_tool/BagRecorderNode
+
+  所以它目前更像旧工程遗留的集成模板。
+
+  ## src/radar_core/src/radar_vision/launch/map_server_launch.py
+
+  启动 Nav2 的 map_server，加载比赛场地地图，并通过命令把生命周期节点切换到：
+
+  configure → activate
+
+  地图坐标系设置为 rm_frame。
+
+  地图路径目前也是依赖运行目录的相对路径：
+
+  src/radar_vision/maps/map.yaml
+
+  ## src/radar_core/src/radar_vision/maps/map.yaml
+
+  Nav2 地图描述文件，指定：
+
+  - 地图图片：config/RM2025.png
+  - 分辨率：约 0.015376 m/pixel
+  - 原点：[0, 0, 0]
+  - 占用和空闲阈值；
+  - raw 地图模式。
+
+  ———
+
+  # 八、整体数据流总结
+
+   阶段        输入                处理                   输出
+  ━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   相机采集    实际相机/rosbag     发布图像               camera_image
+  ──────────  ──────────────────  ─────────────────────  ────────────────────────────────
+   一级检测    整幅图像            YOLOv8 检测车辆        车辆框
+  ──────────  ──────────────────  ─────────────────────  ────────────────────────────────
+   二级检测    车辆 ROI            YOLOv8 检测装甲板      装甲板框
+  ──────────  ──────────────────  ─────────────────────  ────────────────────────────────
+   三级分类    装甲板 ROI          DenseNet 分类编号      机器人编号
+  ──────────  ──────────────────  ─────────────────────  ────────────────────────────────
+   颜色判断    装甲板图像          比较红蓝通道           红方/蓝方
+  ──────────  ──────────────────  ─────────────────────  ────────────────────────────────
+   检测输出    编号、颜色、中心    组织消息               detect_result
+  ──────────  ──────────────────  ─────────────────────  ────────────────────────────────
+   坐标解算    像素坐标            区域高度 + 透视变换    场地坐标
+  ──────────  ──────────────────  ─────────────────────  ────────────────────────────────
+   解算输出    场地坐标            消息与点云             resolve_result、camera_point3D
+  ──────────  ──────────────────  ─────────────────────  ────────────────────────────────
+   标定        5 对 2D/3D 点       solvePnP               out_matrix.yaml
+
+  需要特别注意的是，很多配置和资源通过 ./config/... 相对路径读取。因此这些节点默认假设进程工作目录是 src/radar_core，如果从其他目录启
+  动，模型、内参、地图和外参文件可能无法找到。

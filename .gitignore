@@ -1,0 +1,29 @@
+# =============================================================================
+# radar_ws 根仓库 .gitignore
+# 仓库根 = 工作空间根（colcon 的 build/install/log 与数据包都在这里，必须忽略）
+# =============================================================================
+
+# ---- colcon 构建产物 ----
+build/
+install/
+log/
+.cache/
+
+# ---- 数据包与生成物（大文件）----
+bags/
+*.db3
+*.db3-wal
+*.db3-shm
+*.mcap
+*.lvx
+ros2bags/
+*.engine
+
+# ---- 本机/一次性文件 ----
+compile_commands.json
+__pycache__/
+*.pyc
+detach_from_tdt.sh
+promote_git_to_root.sh
+*.tar.gz
+*.bundle

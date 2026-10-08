@@ -1,0 +1,15 @@
+{
+    "cmake.sourceDirectory": "/home/camelliahm/radar_ws/src/hik_camera",
+    "git.autoRepositoryDetection": "subFolders",
+    "git.repositoryScanMaxDepth": 3,
+    "git.repositoryScanIgnoredFolders": [
+        "build",
+        "install",
+        "log",
+        "bags",
+        "model"
+    ],
+    "git.scanRepositories": [
+        "src/radar_core"
+    ]
+}
