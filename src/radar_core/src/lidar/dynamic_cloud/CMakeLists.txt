@@ -16,7 +16,7 @@ ament_auto_add_library(${DYNAMIC_CLOUD} SHARED
 target_link_libraries(${DYNAMIC_CLOUD} ${PCL_LIBRARIES})
 
 rclcpp_components_register_node(${DYNAMIC_CLOUD}
-    PLUGIN "tdt_radar::DynamicCloud"
+    PLUGIN "radar_core::DynamicCloud"
     EXECUTABLE ${DYNAMIC_CLOUD}_node
 )
 

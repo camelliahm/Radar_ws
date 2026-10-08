@@ -3,9 +3,9 @@
 <package format="3">
   <name>rosbag_player</name>
   <version>0.0.0</version>
-  <description>ros bag toolkit</description>
-  <maintainer email="xun_001@outlook.com">tdt</maintainer>
-  <license>TODO: License declaration</license>
+  <description>In-process rosbag playback component</description>
+  <maintainer email="2037945890@qq.com">camelliahm</maintainer>
+  <license>MIT</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 

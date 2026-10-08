@@ -17,7 +17,7 @@
 #include <pcl/registration/registration.h>
 #include <boost/shared_ptr.hpp>
 
-namespace tdt_radar {
+namespace radar_core {
     struct Grid {
   pcl::PointXYZ farthestPoint;
   double maxDistance = -1.0;
@@ -183,5 +183,5 @@ private:
 
     std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
 };
-} // namespace tdt_radar
-RCLCPP_COMPONENTS_REGISTER_NODE(tdt_radar::Localization)
+} // namespace radar_core
+RCLCPP_COMPONENTS_REGISTER_NODE(radar_core::Localization)

@@ -61,10 +61,10 @@ def generate_launch_description():
             on_exit=Shutdown(),
         )
         
-    localization_node = get_localization_node('localization', 'tdt_radar::Localization')
-    dynamic_cloud_node = get_dynamic_cloud_node('dynamic_cloud', 'tdt_radar::DynamicCloud')
-    cluster_node = get_cluster_node('cluster', 'tdt_radar::Cluster')
-    kalman_filter_node = get_kalman_filter_node('kalman_filter', 'tdt_radar::KalmanFilter')
+    localization_node = get_localization_node('localization', 'radar_core::Localization')
+    dynamic_cloud_node = get_dynamic_cloud_node('dynamic_cloud', 'radar_core::DynamicCloud')
+    cluster_node = get_cluster_node('cluster', 'radar_core::Cluster')
+    kalman_filter_node = get_kalman_filter_node('kalman_filter', 'radar_core::KalmanFilter')
 
     lidar_detector = get_container(
                                     localization_node,

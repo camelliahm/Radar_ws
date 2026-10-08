@@ -16,7 +16,7 @@
 #include "sensor_msgs/msg/point_cloud2.hpp"
 #include "sensor_msgs/point_cloud2_iterator.hpp"
 
-namespace tdt_radar {
+namespace radar_core {
 class KalmanFilter : public rclcpp::Node {
 public:
     KalmanFilter(const rclcpp::NodeOptions& node_options);
@@ -46,4 +46,4 @@ private:
     vision_interface::msg::RadarWarn lidar_detect;
     vision_interface::msg::MatchInfo match_info;
 };
-}  // namespace tdt_radar
+}  // namespace radar_core

@@ -2,9 +2,9 @@
 <package format="3">
   <name>vision_interface</name>
   <version>0.0.0</version>
-  <description>TODO: Package description</description>
-  <maintainer email="xun_001@outlook.com">tdt-link</maintainer>
-  <license>TODO: License declaration</license>
+  <description>Detection, fusion and sentry communication messages</description>
+  <maintainer email="2037945890@qq.com">camelliahm</maintainer>
+  <license>MIT</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 

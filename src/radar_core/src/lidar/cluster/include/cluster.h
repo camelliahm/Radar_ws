@@ -13,7 +13,7 @@
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
 #include "sensor_msgs/point_cloud2_iterator.hpp"
-namespace tdt_radar {
+namespace radar_core {
 class Cluster : public rclcpp::Node {
 public:
     Cluster(const rclcpp::NodeOptions& node_options);
@@ -25,4 +25,4 @@ private:
     void callback(const sensor_msgs::msg::PointCloud2::SharedPtr msg);
     std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr> accumulated_clouds_;
 };
-}  // namespace tdt_radar
+}  // namespace radar_core

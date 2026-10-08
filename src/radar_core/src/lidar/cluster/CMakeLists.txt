@@ -16,7 +16,7 @@ ament_auto_add_library(${CLUSTER_NODE} SHARED
 target_link_libraries(${CLUSTER_NODE} ${PCL_LIBRARIES})
 
 rclcpp_components_register_node(${CLUSTER_NODE}
-    PLUGIN "tdt_radar::Cluster"
+    PLUGIN "radar_core::Cluster"
     EXECUTABLE ${CLUSTER_NODE}_node
 )
 ament_auto_package ()

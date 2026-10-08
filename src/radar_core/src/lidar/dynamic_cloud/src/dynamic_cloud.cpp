@@ -4,7 +4,7 @@
 #include <pcl/point_cloud.h>
 #include <pcl_conversions/pcl_conversions.h>
 #include <rclcpp/time.hpp>
-namespace tdt_radar {
+namespace radar_core {
 DynamicCloud::DynamicCloud(const rclcpp::NodeOptions& node_options)
     : rclcpp::Node("dynamic_cloud_node", node_options),
       tf_buffer_(this->get_clock()),
@@ -312,6 +312,6 @@ void DynamicCloud::callback(
                 .count() /
             1000.0);
 }
-}  // namespace tdt_radar
+}  // namespace radar_core
 
-RCLCPP_COMPONENTS_REGISTER_NODE(tdt_radar::DynamicCloud)
+RCLCPP_COMPONENTS_REGISTER_NODE(radar_core::DynamicCloud)

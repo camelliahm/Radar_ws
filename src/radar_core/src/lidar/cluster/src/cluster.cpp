@@ -5,7 +5,7 @@
 #include <pcl/point_cloud.h>
 #include <pcl/segmentation/extract_clusters.h>
 #include <rclcpp/duration.hpp>
-namespace tdt_radar {
+namespace radar_core {
 
 Cluster::Cluster(const rclcpp::NodeOptions& node_options)
     : Node("cluster_node", node_options)
@@ -80,6 +80,6 @@ void Cluster::callback(const sensor_msgs::msg::PointCloud2::SharedPtr msg)
                 .count() /
             1000.0);
 }
-}  // namespace tdt_radar
+}  // namespace radar_core
 
-RCLCPP_COMPONENTS_REGISTER_NODE(tdt_radar::Cluster)
+RCLCPP_COMPONENTS_REGISTER_NODE(radar_core::Cluster)

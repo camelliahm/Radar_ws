@@ -18,7 +18,7 @@
 #include "sensor_msgs/msg/point_cloud2.hpp"
 #include "sensor_msgs/point_cloud2_iterator.hpp"
 
-namespace tdt_radar {
+namespace radar_core {
 class DynamicCloud : public rclcpp::Node {
 public:
     DynamicCloud(const rclcpp::NodeOptions& node_options);
@@ -44,4 +44,4 @@ private:
     tf2_ros::Buffer                 tf_buffer_;
     tf2_ros::TransformListener      tf_listener_;
 };
-}  // namespace tdt_radar
+}  // namespace radar_core

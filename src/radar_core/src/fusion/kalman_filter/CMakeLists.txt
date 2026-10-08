@@ -17,7 +17,7 @@ ament_auto_add_library(${KALMAN_FILTER} SHARED
 target_link_libraries(${KALMAN_FILTER} ${PCL_LIBRARIES})
 
 rclcpp_components_register_node(${KALMAN_FILTER}
-    PLUGIN "tdt_radar::KalmanFilter"
+    PLUGIN "radar_core::KalmanFilter"
     EXECUTABLE ${KALMAN_FILTER}_node
 )
 

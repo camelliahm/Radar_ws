@@ -2,7 +2,7 @@
 #include <pcl_conversions/pcl_conversions.h>
 #include "filter_plus.h"
 
-namespace tdt_radar {
+namespace radar_core {
 
 KalmanFilter::KalmanFilter(const rclcpp::NodeOptions& node_options)
     : rclcpp::Node("kalman_filter_node", node_options)
@@ -202,5 +202,5 @@ void KalmanFilter::callback(
         radar_pub_->publish(radar_msg);
     }
 }
-}  // namespace tdt_radar
-RCLCPP_COMPONENTS_REGISTER_NODE(tdt_radar::KalmanFilter)
+}  // namespace radar_core
+RCLCPP_COMPONENTS_REGISTER_NODE(radar_core::KalmanFilter)

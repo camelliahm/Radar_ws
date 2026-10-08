@@ -16,7 +16,7 @@ ament_auto_add_library(${LOCALIZATION_NODE} SHARED
 target_link_libraries(${LOCALIZATION_NODE} ${PCL_LIBRARIES})
 
 rclcpp_components_register_node(${LOCALIZATION_NODE}
-    PLUGIN "tdt_radar::Localization"
+    PLUGIN "radar_core::Localization"
     EXECUTABLE ${LOCALIZATION_NODE}_node
 )
 target_link_libraries(${LOCALIZATION_NODE} ${PCL_LIBRARIES})

@@ -10,7 +10,7 @@
 #include <vision_interface/msg/match_info.hpp>
 #include <vision_interface/msg/radar2_sentry.hpp>
 #include <vision_interface/msg/radar_warn.hpp>
-namespace tdt_radar {
+namespace radar_core {
 class DebugMap : public rclcpp::Node {
 public:
     explicit DebugMap(const rclcpp::NodeOptions& options)
@@ -273,13 +273,13 @@ public:
     cv::Mat                          map;
     int                              count = 0;
 };
-}  // namespace tdt_radar
+}  // namespace radar_core
 
 int main(int argc, char* argv[])
 {
     rclcpp::init(argc, argv);
     auto node_options = rclcpp::NodeOptions();
-    rclcpp::spin(std::make_shared<tdt_radar::DebugMap>(node_options));
+    rclcpp::spin(std::make_shared<radar_core::DebugMap>(node_options));
     rclcpp::shutdown();
     return 0;
 }

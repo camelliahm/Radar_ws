@@ -1,16 +1,10 @@
 <div align="center">
 
-# T-DT 2025 Radar
+# Radar Core
 
-> 2025年东北大学T-DT实验室 RoboMaster超级对抗赛 雷达代码
+> RoboMaster 雷达站：激光雷达 + 单目相机目标识别与多传感器后融合（ROS 2 Jazzy）
 
 <a href="./LICENSE"><img alt="License" src="https://img.shields.io/badge/License-MIT-yellow"></a>
-<a href="https://neutdt.cn"><img alt="Home Page" src="https://img.shields.io/badge/Home%20Page-T--DT-green"></a>
-
-<p align="center">
-  <img src=".github/NEU.webp" width="300"/>
-  <img src=".github/T-DT.jpg" width="300"/>
-</p>
 
 </div>
 
@@ -22,50 +16,23 @@
 
 <div align="left">
 
-# 版本和发布记录
-
-### 当前版本
-
-**v0.0.1beta**
-- 初始化仓库，加入基础内容，初版README
+# 版本记录
 
 **v1.0**
-- 加入开源技术报告链接
-
->以上版本见以往赛季仓库 https://github.com/T-DT-Algorithm-2024/T-DT-2024-Radar
-
-**v2.0**
-- 进入2025赛季，更新README，适配新赛季
-
-**v2.1**
-- 添加技术报告链接，提供rosbag数据。
+- 初始版本：雷达点云处理（GICP 配准 / 动态点云 / 聚类）+ 单目相机识别解算 + 雷视后融合
+- 本机适配：CUDA 架构 `sm_120`、TensorRT 引擎路径、rosbag 路径、相机替换为海康 MV-CS060-10UC-PRO
 
 # 项目介绍
 
+本项目通过激光雷达和单目相机的目标检测，进行传感器后融合，实现了传感器之间的完全解耦合，避免了联合标定带来的误差，同时开发难度不随传感器数量增加而增加。
 
-本项目通过激光雷达和单目相机的目标检测，进行传感器后融合，实现了传感器之间的完全解耦合，避免了联合标定带来的误差，同时开发难度不随传感器数量增加而增加。  
-
-东北大学RM2025雷达技术报告 [https://bbs.robomaster.com/article/803954](https://bbs.robomaster.com/article/803954)
-
-
-**如果你没有激光雷达，也可以直接使用本项目的单目相机方案 (在RM2023的0.6m误差规则下取得了最高91%的准确率，荣获2023年雷达MVP)**
+**如果没有激光雷达，也可以只使用本项目的单目相机方案。**
 
 <p align="center">
   <img src=".github/icp.png" alt="配准效果"  width="60%">
   <br>
-  <em>图1：配准效果</em>
+  <em>图1：点云配准效果</em>
 </p>
-
-
-**本项目连续入选2024,2025两届全明星赛，并在2025全明星赛中获得局均伤害第一，局均高亮时长第二的好成绩**
-
-
-<p align="center">
-  <img src=".github/data.jpg" alt="比赛数据"  width="50%">
-  <br>
-  <em>图2：比赛数据</em>
-</p>
-
 
 ## 项目优势
 - 1.即插即用，不依赖联合标定，脱离空间(机械结构)上的限制
@@ -74,12 +41,13 @@
 - 4.三层神经网络实现了更好的鲁棒性和可修复性，极大地降低了模型训练和数据集整理的难度和时间。
 - 5.低耦合，易于维护和扩展
 - 6.雷达全自动配准，节约3分钟部署时间
-## 硬件条件
 
-- 激光雷达 Livox Avia
-- 单目相机 Hikvision CH-120-10UC
-- CPU i7-12700KF
-- GPU RTX A4000 * 2
+## 本机硬件
+
+- 激光雷达 Livox Mid-70
+- 单目相机 海康 MV-CS060-10UC-PRO（3072×2048）
+- 系统 Ubuntu 24.04 + ROS 2 Jazzy
+- 推理 CUDA 13.4 + TensorRT 11.3，CUDA 架构 `sm_120`
 
 ## 项目结构说明
 
@@ -103,13 +71,11 @@
 | resnet18 | 224x224 | 数字分类 |
 
 建议根据相机分辨率调整模型大小，以提高推理速度。
-- RTX A4000 实测50Hz
-- RTX 3050M (35W极致阉割版) 实测16Hz
 
 由于使用了时间同步，只要推理速度>10Hz 也能正常使用。
 
 **模型存储在 model/ONNX 文件夹下**
-- 提供了onnx自动转换trt，如果没有检测到TensorRT编译的模型，会自动编译对应模型。
+- 提供了 onnx 自动转换 trt，如果没有检测到 TensorRT 编译的模型，会自动编译对应模型。
 
 ### 激光雷达
 
@@ -124,16 +90,16 @@
 - 使用卡尔曼滤波器对激光雷达识别到的目标进行跟踪，同时将相机识别结果向卡尔曼轨迹进行匹配，最后融合卡尔曼滤波器结果和相机识别结果，输出最终结果。
 
 ### 工具包
-- 进程内播放rosbag (ros2 jazzy已支持)
+- 进程内播放 rosbag (ros2 jazzy 已支持)
 
 ## 模块介绍
 
 | 模块 | 说明 |
 | --- | --- |
 | [`lidar`](./src/lidar/) | 激光雷达模块 |
-| [`camera`](./src/tdt_vision/) | 相机模块（无相机驱动） |
+| [`camera`](./src/radar_vision/) | 相机模块（无相机驱动） |
 | [`interface`](./src/interface/) | 自定义消息接口 |
-| [`livox_driver`](./src/livox_driver/) | Livox驱动 |
+| [`livox_driver`](./src/livox_driver/) | Livox 驱动 |
 | [`fusion`](./src/fusion/) | 传感器后融合模块 |
 | [`utils`](./src/utils/) | 工具包 |
 | [~~`llm_decision`~~](./src/llm_decision/) | ~~大模型决策模块~~ |
@@ -148,7 +114,8 @@ OpenCV 4.6.0
 PCL 1.14.0
 Livox_SDK(1)
 ```
->友情链接：Livox_SDK(1)-2404：https://github.com/mozihe/Livox-SDK-24.04
+> Livox SDK：https://github.com/Livox-SDK/Livox-SDK
+
 ## 进程间通信消息名称及用途
 
 ### 1. ROS2 通信
@@ -184,20 +151,19 @@ Livox_SDK(1)
 
 
 ## 测试
-    
+
 ```bash
-ros2 launch tdt_vision run_rosbag.launch.py #通过rosbag启动相机
+ros2 launch radar_vision run_rosbag.launch.py #通过rosbag启动相机
 ros2 launch dynamic_cloud lidar.launch.py #启动激光雷达识别
 ros2 run debug_map debug_map #启动地图可视化
 ros2 launch livox_ros2_driver livox_lidar_launch.py #启动Livox驱动
 ```
-测试ros2bag下载
-[谷歌网盘](https://drive.google.com/file/d/1hBJER_jnCrIQ21ojHj7HG4pWShSiCSPD/view?usp=sharing)
 
-修改tdt_vision/launch对应的launch文件中的rosbag路径即可进程内播放对应的rosbag
+`run_rosbag.launch.py` 与 `calib_rosbag.launch.py` 里的 rosbag 路径目前是硬编码绝对路径（默认 `~/radar_ws/bags/merged_bag_1.db3`），换机器或换数据包时需要改这两个 launch 文件。
+
 ### 相机外参标定
 ```bash
-ros2 launch tdt_vision calib_rosbag.launch.py
+ros2 launch radar_vision calib_rosbag.launch.py
 ```
 按Enter键开始标定,依次点击我方堡垒靠近我方的底角，我方前哨站血条底部，敌方基地引导灯，敌方前哨战引导灯，敌方四十三度坡围挡左底角。
 
@@ -209,8 +175,9 @@ Launch文件已集成foxglove-bridge,启动后直接打开foxglove-studio即可�
 - 多相机/雷达从当前逻辑(结构)上可以实现，但是并没有进行对应ros2接口的适配
 - 改进聚类与匹配算法
 - 使用ros参数，实时调参
-# 联系方式
-Email: zhujunheng2005@gmail.com  
-QQ: 820288431  
+- 把 rosbag 路径改为 launch 参数，去掉硬编码绝对路径
+# 仓库
+
+https://github.com/camelliahm/Radar_ws
 
 </div>
