@@ -1,11 +1,32 @@
 {
     "configurations": [
         {
-            "name": "Linux",
+            "name": "ROS 2 Jazzy",
             "compileCommands": "${workspaceFolder}/compile_commands.json",
+            "includePath": [
+                "${workspaceFolder}/src/**/include",
+                "${workspaceFolder}/install/**/include",
+                "/opt/ros/jazzy/include/**",
+                "/opt/MVS/include",
+                "/usr/local/cuda/include",
+                "/usr/include/eigen3",
+                "/usr/include/pcl-1.14",
+                "/usr/include/opencv4"
+            ],
             "cStandard": "c17",
-            "cppStandard": "c++17",
-            "intelliSenseMode": "linux-gcc-x64"
+            "cppStandard": "c++20",
+            "intelliSenseMode": "linux-gcc-x64",
+            "compilerPath": "/usr/bin/g++",
+            "cudaPath": "/usr/local/cuda",
+            "browse": {
+                "path": [
+                    "${workspaceFolder}/src",
+                    "/opt/ros/jazzy/include",
+                    "/usr/include",
+                    "/usr/local/cuda/include"
+                ],
+                "limitSymbolsToIncludedHeaders": true
+            }
         }
     ],
     "version": 4
