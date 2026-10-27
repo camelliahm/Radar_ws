@@ -2,11 +2,13 @@ import sys
 import time
 import rclpy
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 from sensor_msgs.msg import Image, PointCloud2
 from sensor_msgs_py import point_cloud2
 from cv_bridge import CvBridge
-from rcl_interfaces.srv import SetParameters
-from rcl_interfaces.msg import Parameter, ParameterValue, ParameterType
+from rcl_interfaces.srv import SetParameters, GetParameters
+from rcl_interfaces.msg import Parameter as ParamMsg
+from rcl_interfaces.msg import ParameterValue, ParameterType
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QLabel, QWidget,
                               QHBoxLayout, QVBoxLayout, QFrame, QSizePolicy,
                               QGridLayout, QPushButton, QCheckBox, QSpinBox)
@@ -97,6 +99,12 @@ class RosNode(Node):
         self.lidar_sub = self.create_subscription(
             PointCloud2, '/livox/lidar', self.lidar_callback, 10)
 
+        # kalman_filter 节点的参数服务，用于读写己方颜色
+        self.kf_client = self.create_client(
+            SetParameters, '/kalman_filter_node/set_parameters')
+        self.kf_get_client = self.create_client(
+            GetParameters, '/kalman_filter_node/get_parameters')
+
     def image_callback(self, msg):
         try:
             self.latest_frame = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
@@ -153,15 +161,61 @@ class RosNode(Node):
             return False
         req = SetParameters.Request()
         req.parameters = [
-            Parameter(name='exposure_time',
-                      value=ParameterValue(type=ParameterType.PARAMETER_DOUBLE,
-                                           double_value=float(exposure))),
-            Parameter(name='gain',
-                      value=ParameterValue(type=ParameterType.PARAMETER_DOUBLE,
-                                           double_value=float(gain))),
+            ParamMsg(name='exposure_time',
+                     value=ParameterValue(type=ParameterType.PARAMETER_DOUBLE,
+                                          double_value=float(exposure))),
+            ParamMsg(name='gain',
+                     value=ParameterValue(type=ParameterType.PARAMETER_DOUBLE,
+                                          double_value=float(gain))),
         ]
         client.call_async(req)
         return True
+
+    def set_self_color(self, color):
+        """写入 kalman_filter_node 的 self_color 参数，0 蓝 2 红"""
+        if not self.kf_client.service_is_ready():
+            # 服务刚启动时可能尚未发现，短暂等待一次
+            self.kf_client.wait_for_service(timeout_sec=0.3)
+        if not self.kf_client.service_is_ready():
+            return False, 'kalman_filter 节点未运行'
+        req = SetParameters.Request()
+        req.parameters = [
+            ParamMsg(name='self_color',
+                     value=ParameterValue(
+                         type=ParameterType.PARAMETER_INTEGER,
+                         integer_value=int(color))),
+        ]
+        future = self.kf_client.call_async(req)
+        # 参数服务应毫秒级返回，超时即视为失败
+        deadline = time.time() + 0.5
+        while not future.done() and time.time() < deadline:
+            rclpy.spin_once(self, timeout_sec=0.01)
+        if not future.done():
+            return False, '参数服务超时'
+        results = future.result().results
+        if not results or not results[0].successful:
+            reason = results[0].reason if results else '无返回'
+            return False, f'拒绝：{reason}'
+        return True, ''
+
+    def get_self_color(self):
+        """回读节点当前己方颜色，失败返回 None"""
+        if not self.kf_get_client.service_is_ready():
+            return None
+        req = GetParameters.Request()
+        req.names = ['self_color']
+        future = self.kf_get_client.call_async(req)
+        deadline = time.time() + 0.3
+        while not future.done() and time.time() < deadline:
+            rclpy.spin_once(self, timeout_sec=0.01)
+        if not future.done():
+            return None
+        values = future.result().values
+        if not values:
+            return None
+        if values[0].type != ParameterType.PARAMETER_INTEGER:
+            return None
+        return int(values[0].integer_value)
 
 
 class StatusDot(QWidget):
@@ -203,6 +257,43 @@ class CameraPanel(QFrame):
         title.setStyleSheet(
             f"color: {TEXT}; font-size: {FONT_PANEL_TITLE}px; font-weight: bold;")
         layout.addWidget(title)
+
+        # ===== 己方阵营选择 =====
+        color_row = QWidget()
+        ccl = QHBoxLayout(color_row)
+        ccl.setContentsMargins(0, 0, 0, 0)
+        ccl.setSpacing(12)
+
+        side_l = QLabel("己方阵营")
+        side_l.setStyleSheet(f"color: {TEXT}; font-size: {FONT_BODY}px;")
+        ccl.addWidget(side_l)
+
+        self.blue_btn = QPushButton("蓝方")
+        self.blue_btn.setMinimumHeight(52)
+        self.blue_btn.setCursor(Qt.PointingHandCursor)
+        self.blue_btn.clicked.connect(lambda: self.set_side(0))
+        ccl.addWidget(self.blue_btn)
+
+        self.red_btn = QPushButton("红方")
+        self.red_btn.setMinimumHeight(52)
+        self.red_btn.setCursor(Qt.PointingHandCursor)
+        self.red_btn.clicked.connect(lambda: self.set_side(2))
+        ccl.addWidget(self.red_btn)
+
+        ccl.addStretch()
+
+        self.side_label = QLabel("当前：未同步")
+        self.side_label.setStyleSheet(
+            f"color: {TEXT_DIM}; font-size: {FONT_BODY}px;")
+        ccl.addWidget(self.side_label)
+
+        layout.addWidget(color_row)
+
+        # 节点当前颜色，None 表示尚未回读到
+        self.current_side = None
+        # 距上次回读的帧数，用于限制回读频率
+        self.sync_ticks = 0
+        self._render_side()
 
         self.image_label = QLabel("等待相机数据...")
         self.image_label.setAlignment(Qt.AlignCenter)
@@ -276,6 +367,69 @@ class CameraPanel(QFrame):
             self.state_label.setText(f"已发送：曝光={exposure}us 增益={gain}")
         else:
             self.state_label.setText("失败：相机节点未运行")
+
+    def set_side(self, color):
+        """把己方阵营写入滤波节点，0 蓝 2 红"""
+        ok, err = self.ros_node.set_self_color(color)
+        if ok:
+            # 以节点实际接受的值为准
+            self.current_side = color
+        else:
+            self.side_label.setText(f"失败：{err}")
+        self._render_side()
+
+    def sync_side(self):
+        """定时回读节点颜色，保证按钮状态与节点一致"""
+        self.sync_ticks += 1
+        # 每 15 帧（约 0.5 秒）回读一次，避免频繁阻塞
+        if self.sync_ticks % 15 != 0:
+            return
+        color = self.ros_node.get_self_color()
+        if color is None:
+            # 节点未运行或回读失败，标记为未同步
+            self.current_side = None
+        else:
+            self.current_side = color
+        self._render_side()
+
+    def _render_side(self):
+        """按当前颜色高亮选中按钮，未同步时两者置灰"""
+        # 蓝方与红方按钮的着色规则：颜色值、选中底色、未选中描边色
+        sides = (
+            (self.blue_btn, 0, BLUE, "#1565c0"),
+            (self.red_btn, 2, RED, "#8e0000"),
+        )
+        for btn, color, base, active in sides:
+            if self.current_side is None:
+                # 未同步：灰色提示，但按钮仍可点击
+                btn.setStyleSheet(
+                    f"background-color: #ececec; color: {TEXT_DIM}; "
+                    f"padding: 10px 28px; font-size: {FONT_BODY}px; "
+                    f"border-radius: 5px; border: 1px solid {BORDER};")
+            elif self.current_side == color:
+                # 选中：实心主题色 + 白字
+                btn.setStyleSheet(
+                    f"background-color: {base}; color: white; "
+                    f"padding: 10px 28px; font-size: {FONT_BODY}px; "
+                    f"font-weight: bold; border-radius: 5px; border: none;")
+            else:
+                # 未选中：白底 + 主题色描边
+                btn.setStyleSheet(
+                    f"background-color: white; color: {active}; "
+                    f"padding: 10px 28px; font-size: {FONT_BODY}px; "
+                    f"border-radius: 5px; border: 1px solid {active};")
+        if self.current_side == 0:
+            self.side_label.setText("当前：蓝方（敌方为红）")
+            self.side_label.setStyleSheet(
+                f"color: {BLUE}; font-size: {FONT_BODY}px;")
+        elif self.current_side == 2:
+            self.side_label.setText("当前：红方（敌方为蓝）")
+            self.side_label.setStyleSheet(
+                f"color: {RED}; font-size: {FONT_BODY}px;")
+        else:
+            self.side_label.setText("当前：未同步")
+            self.side_label.setStyleSheet(
+                f"color: {TEXT_DIM}; font-size: {FONT_BODY}px;")
 
     def update_frame(self, frame):
         h, w, ch = frame.shape
@@ -643,6 +797,9 @@ class MainWindow(QMainWindow):
         cam_ok = self.ros_node.camera_connected()
         if self.ros_node.latest_frame is not None and cam_ok:
             self.camera_panel.update_frame(self.ros_node.latest_frame)
+
+        # 同步滤波节点的己方阵营，保证按钮高亮与节点一致
+        self.camera_panel.sync_side()
 
         radar_ok = self.ros_node.lidar_connected()
         if radar_ok and self.ros_node.latest_lidar_points is not None:

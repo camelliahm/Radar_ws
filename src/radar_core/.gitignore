@@ -3,6 +3,7 @@ log/
 install/
 .cache/
 .vscode/
+.workbuddy/
 
 config/merged_bag/*
 

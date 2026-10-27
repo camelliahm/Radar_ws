@@ -20,6 +20,7 @@ ros2bags/
 *.engine
 
 # ---- 本机/一次性文件 ----
+.workbuddy/
 compile_commands.json
 __pycache__/
 *.pyc
