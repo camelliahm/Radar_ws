@@ -11,6 +11,9 @@
 #include <vision_interface/msg/radar2_sentry.hpp>
 #include <vision_interface/msg/radar_warn.hpp>
 namespace radar_core {
+// 2D 地图调试与最终消息输出节点。
+// 输入：/kalman_detect（雷达融合结果）、/resolve_result（相机解算结果）、/match_info
+// 输出：/map_2d（俯视图调试画面）、/hero_state（英雄位置预警）、/Radar2Sentry（发给哨兵）
 class DebugMap : public rclcpp::Node {
 public:
     explicit DebugMap(const rclcpp::NodeOptions& options)
@@ -40,8 +43,11 @@ public:
         radar2sentry_pub =
             this->create_publisher<vision_interface::msg::Radar2Sentry>(
                 "/Radar2Sentry", rclcpp::SensorDataQoS());
+        // 每个像素代表 1/25 m，即 28m x 15m 场地映射到 700 x 375 的图像
         cv::resize(map, map, cv::Size(28 * 25, 15 * 25));
     }
+    // 缓存裁判系统信息，并把己方颜色做 1<->2 互换，
+    // 这样后续逻辑统一按"1/2 表示谁"来判断，不必在各处再取反
     void save_match_info(
         const std::shared_ptr<vision_interface::msg::MatchInfo> msg)
     {
@@ -50,6 +56,7 @@ public:
             match_info.self_color = 2;
     }
 
+    // 把 6 组蓝/红方点位画到场地俯视图上：位置过期超过 0.5s 的点不再显示
     void show_map()
     {
         auto   now_time = std::chrono::system_clock::now();
@@ -59,9 +66,12 @@ public:
                       1000.0;
         auto clone_map = map.clone();
         for (int i = 0; i < 6; i++) {
+            // 数组下标 0..5 对应编号 1..6，但场上没有编号 6，
+            // 因此跳过 6 直接显示为 7（英雄/工程等大号机器人）
             int number = i + 1;
             if (number == 6)
                 number++;
+            // 坐标 (0,0) 表示本帧无该目标，用乘积判断有效性
             if (blue_point[i].x * blue_point[i].y &&
                 time - blue_update[i] < 0.5) {
                 cv::Point2f point = cv::Point2f(
@@ -88,6 +98,8 @@ public:
         cv::imshow("map", clone_map);
         cv::waitKey(1);
     }
+    // 相机分支：与雷达结果互斥。若距上次雷达更新不足 5s，相机结果不覆盖，
+    // 避免两路结果在画面上来回跳变
     void camera_callback(
         const std::shared_ptr<vision_interface::msg::DetectResult> msg)
     {
@@ -101,6 +113,7 @@ public:
                 if (time - blue_time[i] > 5) {
                     blue_point[i] =
                         cv::Point2f(msg->blue_x[i], msg->blue_y[i]);
+                    // self_color 为 0 表示己方为红方，需把坐标翻到对面半场
                     if (!match_info.self_color) {
                         blue_point[i] = cv::Point2f(28 - msg->blue_x[i],
                                                     15 - msg->blue_y[i]);
@@ -131,6 +144,7 @@ public:
                           now.time_since_epoch())
                           .count() /
                       1000.0;
+        // 雷达结果直接刷新缓存点位（blue_time/red_time 同时作为互斥时间戳）
         for (int i = 0; i < 6; i++) {
             if (msg->blue_x[i] * msg->blue_y[i]) {
                 blue_point[i] = cv::Point2f(msg->blue_x[i], msg->blue_y[i]);
@@ -144,6 +158,7 @@ public:
             }
         }
         show_map();
+        // 英雄位置滞回计数：连续 10 帧以上处于某区域才发出预警，抑制抖动误报
         vision_interface::msg::RadarWarn radar_warn;
         if (hero_count1 > 10) {
             radar_warn.hero_state = 1;
@@ -152,13 +167,16 @@ public:
             radar_warn.hero_state = 2;
             radar_warn_pub->publish(radar_warn);
         }
+        // self_color == 0：己方为红方，敌方为蓝方，此时关注 red_point[0]（编号 1）
         if (match_info.self_color == 0) {
             if (red_point[0].x > (28 - 8.668)) {
+                // 敌方英雄深入我方半场（x 靠近 28）
                 hero_count1++;
                 hero_count2--;
             } else if (red_point[0].x < (28 - 20.3) &&
                        red_point[0].x > (28 - 25.075) &&
                        red_point[0].y < 15 && red_point[0].y > 10.3) {
+                // 敌方英雄位于我方基地附近区域
                 hero_count1--;
                 hero_count2++;
             } else {
@@ -166,6 +184,7 @@ public:
                 hero_count2--;
             }
         }
+        // self_color == 2：己方为蓝方，对称地检查 blue_point[0]
         if (match_info.self_color == 2) {
             if (blue_point[0].x < 8.668) {
                 hero_count1++;
@@ -181,6 +200,10 @@ public:
             }
         }
 
+        // 组装发给哨兵的目标信息。
+        // 易伤机制：marks[i] >= 117 时该编号进入"易伤"状态（relax），
+        // 此时不发送其坐标；marks 降到 105 以下解除易伤。
+        // 处于易伤但仍未解除的过渡期，每 0.35s 补发一次坐标。
         vision_interface::msg::Radar2Sentry radar2sentry;
         if (match_info.self_color == 0) {
             for (int i = 0; i < 6; i++) {
@@ -211,6 +234,7 @@ public:
                 }
             }
         }
+        // 己方为蓝方时逻辑相同，只是数据源换成 blue_point/blue_update
         if (match_info.self_color == 2) {
             for (int i = 0; i < 6; i++) {
                 if (!relax[i]) {
@@ -254,18 +278,23 @@ public:
     rclcpp::Subscription<vision_interface::msg::MatchInfo>::SharedPtr
         match_info_sub;
 
+    // 最近一次雷达结果的时间戳，用于与相机结果做 5s 互斥
     double blue_time[6];
     double red_time[6];
 
+    // 易伤状态标记及其进入时间
     bool   relax[6];
     double relax_time[6];
 
+    // 最近一次有效坐标的时间戳，超过 0.5s 视为过期不再发送/显示
     double blue_update[6];
     double red_update[6];
 
+    // 英雄位置滞回计数器，需要连续多帧才触发预警
     int hero_count1;
     int hero_count2;
 
+    // 当前画面上使用的点位（已按己方颜色做场地翻转）
     cv::Point2f blue_point[6];
     cv::Point2f red_point[6];
 

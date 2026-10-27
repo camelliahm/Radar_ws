@@ -5,20 +5,22 @@
 #include <rclcpp/logging.hpp>
 #include <rclcpp/utilities.hpp>
 #define TDT_INFO(msg) std::cout << msg << std::endl
-#define MAX_CARS 12
-#define MAX_ARMORS 20
+#define MAX_CARS 12    // 单帧最多处理的整车数，超出视为误检
+#define MAX_ARMORS 20  // 单帧最多处理的装甲板数
 namespace radar_core {
-unsigned int count_img = 0;
+unsigned int count_img = 0;  // 调试存图的全局计数器
 
+// 用蓝/红通道的平均差值判断装甲板颜色，返回 0=蓝方、2=红方
 int getColor(cv::Mat& img)
 {
     std::vector<cv::Mat> channels;
-    cv::split(img, channels);
+    cv::split(img, channels);  // BGR 顺序
     cv::Mat    blueMinusRed = channels[0] - channels[2];
     cv::Mat    redMinusBlue = channels[2] - channels[0];
     cv::Scalar avgBlueMinusRed = cv::mean(blueMinusRed);
     cv::Scalar avgRedMinusBlue = cv::mean(redMinusBlue);
     cv::Scalar avgGreen = cv::mean(channels[1]);
+    // 蓝减红的均值更大说明画面整体偏蓝
     if (avgBlueMinusRed[0] > avgRedMinusBlue[0]) {
         return 0;
     } else {
@@ -26,6 +28,7 @@ int getColor(cv::Mat& img)
     }
 }
 
+// small 的四个角点是否都落在 big 内部
 bool isRectInside(const cv::Rect& small, const cv::Rect& big)
 {
     bool topLeftInside = big.contains(small.tl());
@@ -39,6 +42,7 @@ bool isRectInside(const cv::Rect& small, const cv::Rect& big)
             bottomRightInside);
 }
 
+// yolo::Box 版本的包含判断，用于确认装甲板框在整车框内
 bool isBoxInside(const yolo::Box& small, const yolo::Box& big)
 {
     cv::Rect small_rect(small.left, small.top, small.right - small.left,
@@ -48,6 +52,7 @@ bool isBoxInside(const yolo::Box& small, const yolo::Box& big)
     return isRectInside(small_rect, big_rect);
 }
 
+// 把矩形裁剪到图像范围内，避免 ROI 取值越界崩溃
 cv::Rect getSafeRect(cv::Mat& image, cv::Rect& rect)
 {
     cv::Rect save_rect;
@@ -63,6 +68,7 @@ Detect::Detect(const rclcpp::NodeOptions& node_options)
 {
     //cv::namedWindow("detect", cv::WINDOW_NORMAL);
 
+    // TensorRT 推理依赖 CUDA，先做一次可用性检查
     std::cout << "Checking CUDA with nvidia-smi...\n";
     if (system("nvidia-smi") == 0) {
         RCLCPP_INFO(this->get_logger(), "CUDA is available.");
@@ -70,6 +76,7 @@ Detect::Detect(const rclcpp::NodeOptions& node_options)
         RCLCPP_ERROR(this->get_logger(), "CUDA is not available. Exiting.");
         rclcpp::shutdown();
     }
+    // 三个模型各自的 engine 路径
     cv::FileStorage fs;
     fs.open("./config/detect_params.yaml", cv::FileStorage::READ);
     fs["yolo_path"] >> yolo_path;
@@ -77,6 +84,8 @@ Detect::Detect(const rclcpp::NodeOptions& node_options)
     fs["classify_path"] >> classify_path;
     fs.release();
 
+    // engine 文件不存在时调用 onnx2trt.py 现场转换。
+    // 批大小按各级实际数量确定：整车最多 2 台、装甲板最多 12 块、分类最多 20 块
     std::ifstream file1(yolo_path.c_str());
     if (!file1.good()) {
         system("python3 src/utils/onnx2trt.py "
@@ -123,6 +132,7 @@ Detect::Detect(const rclcpp::NodeOptions& node_options)
         classify::load(classify_path, classify::Type::densenet121);
     TDT_INFO("Load classify engine success!");
 
+    // 装甲板阈值放宽（0.4）以便召回，整车阈值收紧（0.65）以减少误检
     this->armor_yolo = yolo::load(armor_path, yolo::Type::V8, 0.4f, 0.45f);
     TDT_INFO("Load armor_yolo engine success!");
     this->yolo = yolo::load(yolo_path, yolo::Type::V8, 0.65f, 0.45f);
@@ -143,6 +153,7 @@ void Detect::callback(const std::shared_ptr<sensor_msgs::msg::Image> msg)
     auto             img = cv_bridge::toCvShare(msg, "bgr8")->image;
     radar_core::Image image(img.data, img.cols, img.rows);
 
+    // 第一级：整图检测机器人与装甲板
     auto result = yolo->forward(image);
     if (result.size() == 0) {
         RCLCPP_INFO(this->get_logger(), "No Car!");
@@ -155,6 +166,7 @@ void Detect::callback(const std::shared_ptr<sensor_msgs::msg::Image> msg)
     std::vector<radar_core::Image> images;
     std::vector<cv::Mat>          car_imgs;
     std::vector<Car>              cars;
+    // 只保留类别 0/1（机器人）的框，丢弃其他类别
     for (auto& box : result) {
         if (box.class_label == 0 || box.class_label == 1) {
             Car car;
@@ -163,13 +175,14 @@ void Detect::callback(const std::shared_ptr<sensor_msgs::msg::Image> msg)
         }
     }
 
+    // 按整车框裁出子图，作为第二级检测的批量输入
     for (auto& car : cars) {
         auto     temp_rect = cv::Rect(car.car.left, car.car.top,
                                       car.car.right - car.car.left,
                                       car.car.bottom - car.car.top);
         cv::Rect temp_car_rect = getSafeRect(img, temp_rect);
         auto     car_img = img(temp_car_rect);
-        car_imgs.push_back(car_img.clone());
+        car_imgs.push_back(car_img.clone());  // clone 保证数据连续
         car.car_rect = temp_car_rect;
     }
 
@@ -179,6 +192,7 @@ void Detect::callback(const std::shared_ptr<sensor_msgs::msg::Image> msg)
         images.push_back(image);
     }
 
+    // 第二级：对每台车的子图批量检测装甲板，结果按输入顺序返回
     auto armor_boxes = armor_yolo->forwards(images);
     bool has_armor = false;
     for (int i = 0; i < armor_boxes.size(); i++) {
@@ -208,6 +222,7 @@ void Detect::callback(const std::shared_ptr<sensor_msgs::msg::Image> msg)
     std::vector<cv::Mat>         armor_imgs;
     std::vector<classify::Image> armor_images;
 
+    // 装甲板框是相对整车裁剪图的坐标，需加回整车左上角偏移才能取到原图
     for (auto& car : cars) {
         if (car.armors.size() == 0) {
             continue;
@@ -226,6 +241,7 @@ void Detect::callback(const std::shared_ptr<sensor_msgs::msg::Image> msg)
             classify::Image(armor_img.data, armor_img.cols, armor_img.rows);
         armor_images.push_back(image);
     }
+    // 第三级：批量识别装甲板上的数字（机器人编号）
     auto armor_result = classifier->forwards(armor_images);
 
     // 保存用来训练分类
@@ -233,6 +249,7 @@ void Detect::callback(const std::shared_ptr<sensor_msgs::msg::Image> msg)
     //    cv::imwrite("debug_out/fenqu_armor/"+std::to_string(armor_result[i])+"/"+std::to_string(count_img++)+".jpg",armor_imgs[i]);
     //  }
 
+    // 把分类结果按顺序回填到各装甲板；armor_result 边取边删以保持与遍历顺序一致
     for (auto& car : cars) {
         if (car.armors.size() == 0) {
             continue;
@@ -256,6 +273,8 @@ void Detect::callback(const std::shared_ptr<sensor_msgs::msg::Image> msg)
         }
         cv::Rect max_rect;
         float    max_confidence = 0;
+        // 每台车取置信度最高的装甲板作为该车的代表；
+        // 排除 0（背景）和 5（可能为未训练类别）两类无效标签
         for (auto& armor : car.armors) {
             if (armor.class_label != 0 && armor.class_label != 5 &&
                 armor.confidence > max_confidence) {
@@ -275,10 +294,12 @@ void Detect::callback(const std::shared_ptr<sensor_msgs::msg::Image> msg)
         auto safe_rect = getSafeRect(img, max_rect);
         auto max_mat = img(safe_rect);
 
+        // 用最佳装甲板区域的颜色判断红蓝方，并计算其中心像素
         car.color = getColor(max_mat);
         car.center = cv::Point2f(max_rect.x + max_rect.width / 2,
                                  max_rect.y + max_rect.height / 2);
         if (car.color == 0) {
+            // 按编号寻址：number 1..6 对应数组下标 0..5
             detect_result.blue_x[car.number - 1] = car.center.x;
             detect_result.blue_y[car.number - 1] = car.center.y;
             if (car.center.x * car.center.y == 0 && car.number != 0) {
@@ -314,6 +335,7 @@ void Detect::callback(const std::shared_ptr<sensor_msgs::msg::Image> msg)
                               2);
         }
     }
+    // 未检测到的编号保持数组默认值 0，下游据此判断"本帧无该编号"
     detect_result.header.stamp = msg->header.stamp;
     pub->publish(detect_result);
     std::chrono::steady_clock::time_point end =
@@ -326,6 +348,7 @@ void Detect::callback(const std::shared_ptr<sensor_msgs::msg::Image> msg)
     cv::Mat final_img;
     cv::resize(img, final_img, cv::Size(1536, 1125));
     //cv::imshow("detect", final_img);
+    // 键盘 'r' 切换调试绘制开关
     auto key = cv::waitKey(1);
     if (key == 'r') {
         debug = !debug;

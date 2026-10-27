@@ -6,6 +6,7 @@ namespace classify {
 
 using namespace std;
 
+// 分类后处理：取输出向量中最大值的下标即为预测类别
 int postprocess(vector<float>& output_array)
 {
     int   max_index = 0;
@@ -19,26 +20,30 @@ int postprocess(vector<float>& output_array)
     return max_index;
 }
 
+// 向上对齐到 align 的整数倍，用于给 GPU workspace 内的数据块做 32 字节对齐
 inline int upbound(int n, int align = 32)
 {
     return (n + align - 1) / align * align;
 }
 
+// 分类推理器：预处理 + TensorRT 前向 + argmax
 class InferImpl : public Infer<int> {
 public:
     shared_ptr<trt::Infer>                         trt_;
     string                                         engine_file_;
     Type                                           type_;
+    // 每张图一份预处理临时缓冲（pinned host + device），避免多图串行时互相覆盖
     vector<shared_ptr<trt::Memory<unsigned char>>> preprocess_buffers_;
-    trt::Memory<float> input_buffer_, output_array_;
-    int                num_class_ = 0;
+    trt::Memory<float> input_buffer_, output_array_;  // 模型输入/输出
+    int                num_class_ = 0;                // 分类数
     int                network_input_width_, network_input_height_;
-    bool               isdynamic_model_ = false;
-    Norm               normalize_;
+    bool               isdynamic_model_ = false;      // 是否为动态 batch
+    Norm               normalize_;                    // 归一化配置
     float              mean_[3], std_[3];
 
     virtual ~InferImpl() = default;
 
+    // 按实际 batch 调整缓冲大小；BaseMemory 内部按容量复用，不会每帧真分配
     void adjust_memory(int batch_size)
     {
         size_t input_numel =
@@ -54,19 +59,23 @@ public:
         }
     }
 
+    // 单图预处理：letterbox 缩放到网络输入尺寸，同步做归一化并写入 CHW 布局
     void
     preprocess(int ibatch, const Image& image,
                shared_ptr<trt::Memory<unsigned char>> preprocess_buffer,
                AffineMatrix& affine, void* stream = nullptr)
     {
+        // 保持宽高比缩放到网络输入尺寸
         affine.compute(
             make_tuple(image.width, image.height),
             make_tuple(network_input_width_, network_input_height_));
 
         size_t input_numel =
             network_input_width_ * network_input_height_ * 3;
+        // 第 ibatch 张图的输入位置
         float*   input_device = input_buffer_.gpu() + ibatch * input_numel;
         size_t   size_image = image.width * image.height * 3;
+        // workspace 布局：前段放仿射矩阵（32 字节对齐），后段放原图
         size_t   size_matrix = upbound(sizeof(affine.d2i), 32);
         uint8_t* gpu_workspace =
             preprocess_buffer->gpu(size_matrix + size_image);
@@ -81,6 +90,8 @@ public:
         cudaStream_t stream_ = (cudaStream_t)stream;
         std::chrono ::high_resolution_clock::time_point a1 =
             std::chrono::high_resolution_clock::now();
+        // 先拷到 pinned host 内存，再由 cudaMemcpyAsync 异步上传，
+        // 相比直接从普通内存拷贝更容易实现真正的异步
         memcpy(image_host, image.bgrptr, size_image);
         memcpy(affine_matrix_host, affine.d2i, sizeof(affine.d2i));
         std::chrono ::high_resolution_clock::time_point a2 =
@@ -93,6 +104,7 @@ public:
         checkRuntime(cudaMemcpyAsync(affine_matrix_device,
                                      affine_matrix_host, sizeof(affine.d2i),
                                      cudaMemcpyHostToDevice, stream_));
+        // 卷积核内完成缩放 + 双线性插值 + 归一化，边界填 114（与 YOLO 惯例一致）
         warp_affine_bilinear_and_normalize_plane(
             image_device, image.width * 3, image.width, image.height,
             input_device, network_input_width_, network_input_height_,
@@ -105,10 +117,12 @@ public:
         if (trt_ == nullptr)
             return false;
 
+        // 打印张量信息，便于确认 engine 与代码期望是否一致
         trt_->print();
 
         this->type_ = type;
 
+        // 假定 binding 0 为输入、binding 1 为输出，格式统一为 NCHW
         auto input_dim = trt_->static_dims(0);
         auto output_dims_ = trt_->static_dims(1);
         puts("input_dim");
@@ -120,6 +134,7 @@ public:
         network_input_height_ = input_dim[2];
         isdynamic_model_ = trt_->has_dynamic_dim();
 
+        // ImageNet 标准均值方差，输入需从 BGR 转 RGB
         mean_[0] = 0.485;
         mean_[1] = 0.456;
         mean_[2] = 0.406;
@@ -148,6 +163,7 @@ public:
         if (num_image == 0)
             return {};
 
+        // 动态 batch 可任意指定；静态 batch 只能小于等于 engine 的最大批
         auto input_dims = trt_->static_dims(0);
         int  infer_batch_size = input_dims[0];
         if (infer_batch_size != num_image) {
@@ -180,10 +196,12 @@ public:
         std::chrono ::high_resolution_clock::time_point a3 =
             std::chrono::high_resolution_clock::now();
         cudaStream_t stream_ = (cudaStream_t)stream;
+        // 逐图预处理，结果依次写入 input_buffer_ 的第 i 段
         for (int i = 0; i < num_image; ++i)
             preprocess(i, images[i], preprocess_buffers_[i],
                        affine_matrixs[i], stream);
 
+        // binding 顺序必须与 engine 一致：先输入后输出
         vector<void*> bindings{input_buffer_.gpu(), output_array_.gpu()};
 
         std::chrono ::high_resolution_clock::time_point a3d1 =
@@ -208,6 +226,7 @@ public:
 
         std::chrono ::high_resolution_clock::time_point a3d4 =
             std::chrono::high_resolution_clock::now();
+        // 异步拷回后同步一次，保证后续在 CPU 上读到完整结果
         checkRuntime(cudaMemcpyAsync(
             output_array_.cpu(), output_array_.gpu(),
             output_array_.gpu_bytes(), cudaMemcpyDeviceToHost, stream_));
@@ -225,6 +244,7 @@ public:
              time_used4.count() * 1000);
         std::chrono ::high_resolution_clock::time_point a5 =
             std::chrono::high_resolution_clock::now();
+        // 逐 batch 取该类别的 argmax
         vector<int> arrout(num_image);
         for (int ib = 0; ib < num_image; ++ib) {
             float*        parray = output_array_.cpu() + ib * num_class_;

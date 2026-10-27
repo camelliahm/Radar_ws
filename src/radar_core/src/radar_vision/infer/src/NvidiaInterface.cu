@@ -51,6 +51,7 @@ namespace trt {
 using namespace std;
 using namespace nvinfer1;
 
+// 从路径中取出文件名：include_suffix 决定是否保留扩展名
 static string file_name(const string& path, bool include_suffix)
 {
     if (path.empty())
@@ -65,6 +66,7 @@ static string file_name(const string& path, bool include_suffix)
                                     p);
 }
 
+// 可变参数日志实现，输出格式为 "[文件名:行号]: 消息"
 void __log_func(const char* file, int line, const char* fmt, ...)
 {
     va_list vl;
@@ -77,6 +79,7 @@ void __log_func(const char* file, int line, const char* fmt, ...)
     fprintf(stdout, "%s\n", buffer);
 }
 
+// 把 TensorRT Dims 格式化为 "a x b x c" 形式的字符串
 static std::string format_shape(const Dims& shape)
 {
     stringstream output;
@@ -89,6 +92,7 @@ static std::string format_shape(const Dims& shape)
     return output.str();
 }
 
+// 用 CUDA event 计时：event 记录在流上，测的是 GPU 实际执行耗时
 Timer::Timer()
 {
     checkRuntime(cudaEventCreate((cudaEvent_t*)&start_));
@@ -130,6 +134,8 @@ BaseMemory::BaseMemory(void* cpu, size_t cpu_bytes, void* gpu,
     reference(cpu, cpu_bytes, gpu, gpu_bytes);
 }
 
+// 只引用外部内存：先释放自己持有的资源，再把指针挂进来。
+// 空指针或零字节归一化为 (nullptr, 0)，此时 owner 置 true 表示"无需释放"
 void BaseMemory::reference(void* cpu, size_t cpu_bytes, void* gpu,
                            size_t gpu_bytes)
 {
@@ -161,6 +167,7 @@ BaseMemory::~BaseMemory()
     release();
 }
 
+// 显存按容量增长：需求不超过已有容量时直接复用，避免每帧 malloc/free
 void* BaseMemory::gpu_realloc(size_t bytes)
 {
     if (gpu_capacity_ < bytes) {
@@ -173,6 +180,7 @@ void* BaseMemory::gpu_realloc(size_t bytes)
     return gpu_;
 }
 
+// pinned memory：锁页内存，H2D/D2H 传输比普通内存快
 void* BaseMemory::cpu_realloc(size_t bytes)
 {
     if (cpu_capacity_ < bytes) {
@@ -186,6 +194,7 @@ void* BaseMemory::cpu_realloc(size_t bytes)
     return cpu_;
 }
 
+// managed memory：CPU/GPU 共用同一地址空间，省去显式拷贝
 void* BaseMemory::unified_realloc(size_t bytes)
 {
     if (unified_capacity_ < bytes) {
@@ -202,6 +211,7 @@ void* BaseMemory::unified_realloc(size_t bytes)
 void BaseMemory::release_cpu()
 {
     if (cpu_) {
+        // 只有自己分配的才释放，外部引用不能动
         if (owner_cpu_) {
             checkRuntime(cudaFreeHost(cpu_));
         }
@@ -241,6 +251,7 @@ void BaseMemory::release()
     release_gpu();
 }
 
+// TensorRT 日志回调：内部错误直接 abort，普通错误打印即可
 class __native_nvinfer_logger : public ILogger {
 public:
     virtual void log(Severity severity, const char* msg) noexcept override
@@ -256,6 +267,7 @@ public:
 
 static __native_nvinfer_logger gLogger;
 
+// TensorRT 对象统一用 destroy() 释放（不能用 delete）
 template <typename _T>
 static void destroy_nvidia_pointer(_T* ptr)
 {
@@ -263,6 +275,7 @@ static void destroy_nvidia_pointer(_T* ptr)
         ptr->destroy();
 }
 
+// 一次性把整个文件读入内存，engine 反序列化需要连续的二进制缓冲
 static std::vector<uint8_t> load_file(const string& file)
 {
     ifstream in(file, ios::in | ios::binary);
@@ -283,6 +296,7 @@ static std::vector<uint8_t> load_file(const string& file)
     return data;
 }
 
+// engine 反序列化的三步：创建 runtime -> 反序列化 engine -> 创建执行上下文
 class __native_engine_context {
 public:
     virtual ~__native_engine_context()
@@ -325,6 +339,8 @@ public:
     shared_ptr<IRuntime>          runtime_ = nullptr;
 };
 
+// TensorRT 推理器实现，把 Triton 风格的 binding 接口映射到 TensorRT 的
+// 新式 API（setTensorAddress + enqueueV3）
 class InferImpl : public Infer {
 public:
     shared_ptr<__native_engine_context> context_;
@@ -355,6 +371,7 @@ public:
         return this->construct(data.data(), data.size());
     }
 
+    // 建立"张量名 -> 索引"映射，后续按名字访问 binding
     void setup()
     {
         auto engine = this->context_->engine_;
@@ -386,6 +403,7 @@ public:
             return false;
         }
 
+        // 逐个张量绑定设备内存地址
         for (int i = 0; i < nbBindings; ++i) {
             if (!context->setTensorAddress(engine->getIOTensorName(i),
                                            bindings[i])) {
@@ -393,11 +411,13 @@ public:
             }
         }
 
+        // 可选：告知 TensorRT 输入数据何时可用（用于多流同步）
         if (input_consum_event) {
             context->setInputConsumedEvent(
                 static_cast<cudaEvent_t>(input_consum_event));
         }
 
+        // 异步提交推理，返回即表示已入队
         return context->enqueueV3(static_cast<cudaStream_t>(stream));
     }
 
@@ -448,6 +468,7 @@ public:
         return this->set_run_dims(index(name), dims);
     }
 
+    // 动态 shape 模型：每次推理前按实际 batch/size 设置输入维度
     virtual bool set_run_dims(int                     ibinding,
                               const std::vector<int>& dims) override
     {
@@ -465,6 +486,7 @@ public:
         return numel(index(name));
     }
 
+    // 元素总数 = 各维乘积
     virtual int numel(int ibinding) override
     {
         const char* tensorName =
@@ -490,6 +512,7 @@ public:
         return static_cast<DType>(dataType);
     }
 
+    // 任一维度为 -1 即存在动态维度
     virtual bool has_dynamic_dim() override
     {
         int numIOTensors = this->context_->engine_->getNbIOTensors();
@@ -508,6 +531,7 @@ public:
         return false;
     }
 
+    // 打印所有输入/输出张量，便于核对模型与代码是否匹配
     virtual void print() override
     {
         INFO("Infer %p [%s]", this,
@@ -537,6 +561,7 @@ public:
         }
 
         INFO("Outputs: %d", num_output);
+        // TensorRT 保证输入张量排在前面，故输出索引需加 num_input 偏移
         for (int i = 0; i < num_output; ++i) {
             const char* name = engine->getIOTensorName(i + num_input);
             auto        dim = engine->getTensorShape(name);

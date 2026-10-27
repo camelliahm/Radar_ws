@@ -4,16 +4,22 @@
 
 
 namespace radar_core {
+// 每个线程负责目标图上的一个像素：
+//   1) 用逆向仿射矩阵（其实是从目标坐标反算源坐标的矩阵）找到源图采样位置；
+//   2) 在源图上做双线性插值；
+//   3) 按 Norm 配置做归一化，并写入 CHW 布局的目标缓冲。
     __global__ void warp_affine_bilinear_and_normalize_plane_kernel(
     uint8_t* src, int src_line_size, int src_width, int src_height,
     float* dst, int dst_width, int dst_height, uint8_t const_value_st,
     float* warp_affine_matrix_2_3, Norm norm)
 {
+    // 线程 -> 目标图像素坐标
     int dx = blockDim.x * blockIdx.x + threadIdx.x;
     int dy = blockDim.y * blockIdx.y + threadIdx.y;
     if (dx >= dst_width || dy >= dst_height)
         return;
 
+    // 2x3 仿射矩阵：目标坐标 -> 源坐标
     float m_x1 = warp_affine_matrix_2_3[0];
     float m_y1 = warp_affine_matrix_2_3[1];
     float m_z1 = warp_affine_matrix_2_3[2];
@@ -25,17 +31,20 @@ namespace radar_core {
     float src_y = m_x2 * dx + m_y2 * dy + m_z2;
     float c0, c1, c2;
 
+    // 完全落在源图之外（letterbox 的填充区），直接填常量（通常为 114 灰边）
     if (src_x <= -1 || src_x >= src_width || src_y <= -1 ||
         src_y >= src_height) {
         c0 = const_value_st;
         c1 = const_value_st;
         c2 = const_value_st;
     } else {
+        // 双线性插值的四个邻点及权重
         int y_low = floorf(src_y);
         int x_low = floorf(src_x);
         int y_high = y_low + 1;
         int x_high = x_low + 1;
 
+        // 越界的邻点用常量值代替，避免读越界同时保持边缘平滑
         uint8_t  const_value[] = {const_value_st, const_value_st,
                                   const_value_st};
         float    ly = src_y - y_low;
@@ -64,6 +73,7 @@ namespace radar_core {
         }
 
         // same to opencv
+        // +0.5f 后取整，与 OpenCV 的四舍五入保持一致
         c0 = floorf(w1 * v1[0] + w2 * v2[0] + w3 * v3[0] + w4 * v4[0] +
                     0.5f);
         c1 = floorf(w1 * v1[1] + w2 * v2[1] + w3 * v3[1] + w4 * v4[1] +
@@ -72,12 +82,14 @@ namespace radar_core {
                     0.5f);
     }
 
+    // OpenCV 读入为 BGR，多数模型要求 RGB，此处交换 0 与 2 通道
     if (norm.channel_type == ChannelType::SwapRB) {
         float t = c2;
         c2 = c0;
         c0 = t;
     }
 
+    // 归一化：MeanStd 为标准化，AlphaBeta 为线性缩放
     if (norm.type == NormType::MeanStd) {
         c0 = (c0 * norm.alpha - norm.mean[0]) / norm.std[0];
         c1 = (c1 * norm.alpha - norm.mean[1]) / norm.std[1];
@@ -88,6 +100,7 @@ namespace radar_core {
         c2 = c2 * norm.alpha + norm.beta;
     }
 
+    // 按 CHW 平面布局写入：三通道各占 area 个连续浮点数
     int    area = dst_width * dst_height;
     float* pdst_c0 = dst + dy * dst_width + dx;
     float* pdst_c1 = pdst_c0 + area;
@@ -96,6 +109,7 @@ namespace radar_core {
     *pdst_c1 = c1;
     *pdst_c2 = c2;
 }
+    // kernel 启动封装：32x32 的 block，grid 按目标尺寸向上取整
     void warp_affine_bilinear_and_normalize_plane(
     uint8_t* src, int src_line_size, int src_width, int src_height,
     float* dst, int dst_width, int dst_height, float* matrix_2_3,
