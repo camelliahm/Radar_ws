@@ -75,7 +75,7 @@ target_include_directories(${PROJECT_NAME} PUBLIC
   ${APR_INCLUDE_DIRS}
   common
   common/rapidjson
-  comon/rapdidxml
+  common/rapidxml
   common/comm
   timesync
   timesync/user_uart

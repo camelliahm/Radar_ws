@@ -65,6 +65,13 @@ ERROR_PATTERNS = re.compile(
 # 纯警告行不算错误，即使命中了上面的模式也剔除，避免掩盖真正的失败原因
 NOISE_PATTERNS = re.compile(r"\b(?:warning|警告)\b", re.IGNORECASE)
 
+# make 只在真正编译源文件时输出这类行；用它区分“编过了”和“增量空转”
+COMPILE_MARKERS = re.compile(r"Building (?:CXX|C|CUDA) object")
+
+# 低于该耗时且没有任何编译动作，才提示“增量空转”：接口包即使不编译，
+# 也要跑 rosidl 生成与 symlink 安装，耗时可达分钟级，不能一并归为空转。
+IDLE_HINT_SECONDS = 10.0
+
 
 def color(text: str, code: str) -> str:
     """在终端支持颜色时给文本着色；输出被重定向时自动降级为纯文本。"""
@@ -473,6 +480,25 @@ def print_summary(summary: Summary) -> None:
             print(f"  未自动提取到报错行，请查看 {location}")
 
 
+def compiled_targets(log_path: Path | None) -> int:
+    """统计本次构建真正发生的编译动作数。
+
+    0 表示 colcon 只是把所有包走了一遍、没有任何源文件需要重编（增量空转），
+    此时耗时极短是正常的，并不代表漏构建了某些包。
+    """
+    if log_path is None:
+        return 0
+
+    count = 0
+    for log_file in log_path.glob("*/stdout.log"):
+        try:
+            with log_file.open("r", encoding="utf-8", errors="replace") as fh:
+                count += sum(1 for line in fh if COMPILE_MARKERS.search(line))
+        except OSError:
+            continue
+    return count
+
+
 def merge_compile_commands() -> bool:
     """调用现有工具脚本合并各包的编译数据库。"""
     script = ROOT / "tools" / "merge_compile_commands.py"
@@ -536,6 +562,13 @@ def main(argv: list[str] | None = None) -> int:
     else:
         summary.total_time = summary.total_time or elapsed
         print_summary(summary)
+
+    # 说明“为什么这么快就全 OK”：纯增量空转，不是漏包
+    if rc == 0 and elapsed < IDLE_HINT_SECONDS and compiled_targets(log_path) == 0:
+        print(
+            f"\n{yellow('[info]')} 本次未重新编译任何源文件（增量空转），包数并未减少；"
+            "需要全量验证请加 -c"
+        )
 
     # --- 合并编译数据库：仅在全量/含接口包的构建后执行 ---
     if rc == 0 and not args.no_merge:
