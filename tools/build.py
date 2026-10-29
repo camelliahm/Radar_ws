@@ -12,7 +12,8 @@
 用法（在任意目录均可执行）：
     python3 tools/build.py                  # 全量增量构建（默认 Release，并行）
     python3 tools/build.py -p radar_vision  # 只构建指定包（可逗号分隔多个）
-    python3 tools/build.py -c               # 清理 build/ install/ log/ 后全量重建
+    python3 tools/build.py -c               # 清 build/ 后重建（强制重新 CMake 配置）
+    python3 tools/build.py --clean-all      # 清 build/ 与 install/ 后重建（依赖库版本变了才需要）
     python3 tools/build.py --debug          # 使用 Debug 构建类型
     python3 tools/build.py --no-merge       # 跳过 compile_commands.json 合并
     python3 tools/build.py -j 8             # 限制并行度为 8
@@ -155,15 +156,26 @@ def colcon_available() -> bool:
     return shutil.which("colcon") is not None
 
 
-def clean_artifacts() -> None:
-    """删除 build/ install/ log/ 三个生成物目录，用于全量重建。
+def clean_build(remove_install: bool = False) -> None:
+    """清理构建缓存，用于全量重建。
 
-    这三个目录都是 colcon 输出物且被 .gitignore 忽略，删除不影响的源码。
+    默认只清 build/：它存放 CMake 配置结果与链接规则，是版本不一致时
+    最需要重建的一层；install/ 里的产物只要源码与依赖没变就仍然有效，
+    清掉它意味着所有包都要重新安装，徒增耗时。
+
+    remove_install=True 时连 install/ 一起清，适用于依赖库版本变更、
+    .so 已指向不存在路径的情况。两个目录都被 .gitignore 忽略，删除不影响源码。
     """
-    for target in (BUILD_DIR, INSTALL_DIR, LOG_DIR):
+    targets = [BUILD_DIR]
+    if remove_install:
+        targets.append(INSTALL_DIR)
+
+    for target in targets:
         if target.is_dir():
             shutil.rmtree(target)
             print(f"  已删除 {target.relative_to(ROOT)}/")
+        else:
+            print(f"  跳过 {target.relative_to(ROOT)}/（不存在）")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -182,7 +194,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "-c",
         "--clean",
         action="store_true",
-        help="构建前删除 build/ install/ log/，即全量重建",
+        help="构建前删除 build/，强制重新执行 CMake 配置",
+    )
+    parser.add_argument(
+        "--clean-all",
+        action="store_true",
+        help="构建前删除 build/ 与 install/（依赖库版本变更时使用，耗时更长）",
     )
     parser.add_argument(
         "--debug",
@@ -220,11 +237,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def system_python() -> str:
+    """返回系统 Python 解释器路径，供 CMake 配置阶段使用。
+
+    ament_cmake 与 rosidl 的 .cmake 脚本会在配置阶段把 Python 解释器路径
+    写死进 execute_process()，之后调用时使用的是绝对路径，因此光调 PATH
+    没有用。当前环境若在 PATH 上安装了另一套 Python（不会带 apt 装的
+    catkin_pkg、em 等模块），必须在此处显式指定系统解释器。
+    """
+    for candidate in ("/usr/bin/python3.12", "/usr/bin/python3"):
+        if Path(candidate).is_file():
+            return candidate
+    return "/usr/bin/python3"
+
+
 def build_command(args: argparse.Namespace) -> list[str]:
     """拼装 colcon build 命令行。
 
     --symlink-install 让 Python/launch/config 以软链接安装，改完无需重新构建；
     --event-handlers console_cohesion+ 把同一个包的输出聚在一起，便于定位报错。
+    Python3_EXECUTABLE 显式指向系统解释器，避免配置阶段选中外部 Python。
     """
     cmd = ["colcon", "build"]
 
@@ -236,6 +268,7 @@ def build_command(args: argparse.Namespace) -> list[str]:
         "--cmake-args",
         f"-DCMAKE_BUILD_TYPE={install_type}",
         "-DCMAKE_EXPORT_COMPILE_COMMANDS=1",
+        f"-DPython3_EXECUTABLE={system_python()}",
     ]
 
     if args.jobs and args.jobs > 0:
@@ -252,11 +285,18 @@ def build_command(args: argparse.Namespace) -> list[str]:
 def shell_command(cmd: list[str], args: argparse.Namespace) -> list[str]:
     """把 colcon 命令包装成“先 source 两个 setup.bash，再执行”的 bash 脚本。
 
-    通过 bash -lc 在子进程内 source，避免污染当前 Python 进程的环境；
+    通过 bash -c 在子进程内 source，避免污染当前 Python 进程的环境；
     set -e 让 source 失败时直接退出，不至于拿脏环境去构建。
+
+    关键一步是把 /usr/bin 前置到 PATH：ROS 的 setup.bash 会在 PATH 上放
+    python3，如果当前 shell 里另有更高优先级的 Python（如独立安装的 3.13），
+    构建过程中调用的 python3 就会换成那个解释器，从而 import 不到
+    catkin_pkg、em 等 apt 安装的模块。固定用系统解释器可消除这一差异。
     """
     setup = find_ros_setup(args.ros_distro)
-    prelude = [f'source "{setup}"'] if setup else []
+    prelude = ['export PATH="/usr/bin:/bin:$PATH"']  # 让 python3 解析到系统解释器
+    if setup:
+        prelude.append(f'source "{setup}"')
     if (INSTALL_DIR / "setup.bash").is_file():
         prelude.append(f'source "{INSTALL_DIR / "setup.bash"}"')
 
@@ -441,6 +481,7 @@ def merge_compile_commands() -> bool:
         return False
 
     step("合并编译数据库")
+    # 合并脚本只用到标准库，任何 Python 3 都可执行，沿用当前解释器即可
     proc = subprocess.run([sys.executable, str(script)], cwd=ROOT, text=True)
     return proc.returncode == 0
 
@@ -467,9 +508,9 @@ def main(argv: list[str] | None = None) -> int:
     print(bold(f"radar_ws 构建  |  {build_type}  |  {scope}  |  并行 {args.jobs}"))
 
     # --- 可选清理 ---
-    if args.clean:
-        step("清理生成物")
-        clean_artifacts()
+    if args.clean or args.clean_all:
+        step("清理构建缓存")
+        clean_build(remove_install=args.clean_all)
 
     # --- 执行构建 ---
     cmd = build_command(args)
