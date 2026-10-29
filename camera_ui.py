@@ -11,7 +11,8 @@ from rcl_interfaces.msg import Parameter as ParamMsg
 from rcl_interfaces.msg import ParameterValue, ParameterType
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QLabel, QWidget,
                               QHBoxLayout, QVBoxLayout, QFrame, QSizePolicy,
-                              QGridLayout, QPushButton, QCheckBox, QSpinBox)
+                              QGridLayout, QPushButton, QCheckBox, QSpinBox,
+                              QDoubleSpinBox)
 from PyQt5.QtGui import QImage, QPixmap, QPainter, QColor, QFont, QPen
 from PyQt5.QtCore import QTimer, Qt
 import numpy as np
@@ -96,8 +97,13 @@ class RosNode(Node):
         self.latest_lidar_points = None
         self.lidar_history = []       # 累积多帧点云
         self.max_history = 3          # 默认保留 3 帧（约 0.3s）
-        self.lidar_sub = self.create_subscription(
-            PointCloud2, '/livox/lidar', self.lidar_callback, 10)
+        self.lidar_source = ""        # 当前点云来源："dynamic" / "raw"
+        self.last_dynamic_time = 0.0  # 最近一次收到动态点云的时刻
+        # dynamic 为已剔除静态背景的目标点云，优先使用；raw 仅在 dynamic 缺席时回落
+        self.lidar_dynamic_sub = self.create_subscription(
+            PointCloud2, '/livox/lidar_dynamic', self.lidar_dynamic_callback, 10)
+        self.lidar_raw_sub = self.create_subscription(
+            PointCloud2, '/livox/lidar', self.lidar_raw_callback, 10)
 
         # kalman_filter 节点的参数服务，用于读写己方颜色
         self.kf_client = self.create_client(
@@ -118,7 +124,19 @@ class RosNode(Node):
         except Exception as e:
             self.get_logger().error(f'转换图像失败: {e}')
 
-    def lidar_callback(self, msg):
+    def lidar_dynamic_callback(self, msg):
+        self.last_dynamic_time = time.time()
+        self.lidar_source = "dynamic"
+        self._update_lidar(msg)
+
+    def lidar_raw_callback(self, msg):
+        # 动态点云在跑时忽略原始点云，避免地面与静态背景点回灌
+        if time.time() - self.last_dynamic_time < 1.0:
+            return
+        self.lidar_source = "raw"
+        self._update_lidar(msg)
+
+    def _update_lidar(self, msg):
         self.latest_lidar_time = time.time()
         try:
             pts = list(point_cloud2.read_points(
@@ -450,6 +468,11 @@ class FieldView(QWidget):
         self.setMinimumSize(400, 400)
         self.points = None
         self.range_m = 15.0
+        # 高度窗：只画 z 落在 [z_min, z_max] 的点，用于滤掉残余地面点
+        self.z_filter_on = True
+        self.z_min = -0.3
+        self.z_max = 3.0
+        self.src_label = ""      # 数据来源标签（dynamic / raw）
         # 倒置相关：默认正常朝向
         self.flip_x = False
         self.flip_y = False
@@ -457,6 +480,15 @@ class FieldView(QWidget):
     def set_points(self, pts):
         self.points = pts
         self.update()
+
+    def set_height_window(self, enabled, z_min, z_max):
+        self.z_filter_on = enabled
+        self.z_min = z_min
+        self.z_max = z_max
+        self.update()
+
+    def set_src(self, text):
+        self.src_label = text
 
     def set_orientation(self, flip_x, flip_y):
         self.flip_x = flip_x
@@ -493,6 +525,8 @@ class FieldView(QWidget):
             painter.setPen(Qt.NoPen)
             for p in self.points:
                 x, y, z = float(p[0]), float(p[1]), float(p[2])
+                if self.z_filter_on and not (self.z_min <= z <= self.z_max):
+                    continue
                 # 根据朝向翻转
                 if self.flip_x:
                     x = -x
@@ -512,7 +546,7 @@ class FieldView(QWidget):
 
             painter.setPen(QColor("#666"))
             painter.setFont(QFont("Ubuntu Mono", FONT_SMALL))
-            painter.drawText(20, 40, f"点数: {len(self.points)}")
+            painter.drawText(20, 40, f"点数: {len(self.points)}  [{self.src_label}]")
         else:
             painter.setPen(QColor("#b0b0b0"))
             painter.setFont(QFont("Ubuntu", FONT_BIG))
@@ -583,6 +617,35 @@ class FieldPanel(QFrame):
         self.range_spin.valueChanged.connect(self._on_range_changed)
         cl.addWidget(self.range_spin)
 
+        # 高度窗：勾选后只显示 z 在 [min, max] 的点
+        self.z_cb = QCheckBox("高度窗(m):")
+        self.z_cb.setChecked(True)
+        self.z_cb.setStyleSheet(f"color: {TEXT}; font-size: {FONT_SMALL}px;")
+        self.z_cb.stateChanged.connect(self._on_z_changed)
+        cl.addWidget(self.z_cb)
+
+        self.z_min_spin = QDoubleSpinBox()
+        self.z_min_spin.setRange(-10.0, 10.0)
+        self.z_min_spin.setSingleStep(0.1)
+        self.z_min_spin.setDecimals(1)
+        self.z_min_spin.setValue(-0.3)
+        self.z_min_spin.setStyleSheet(SPINBOX_STYLE)
+        self.z_min_spin.setMinimumWidth(90)
+        self.z_min_spin.setMaximumHeight(60)
+        self.z_min_spin.valueChanged.connect(self._on_z_changed)
+        cl.addWidget(self.z_min_spin)
+
+        self.z_max_spin = QDoubleSpinBox()
+        self.z_max_spin.setRange(-10.0, 10.0)
+        self.z_max_spin.setSingleStep(0.1)
+        self.z_max_spin.setDecimals(1)
+        self.z_max_spin.setValue(3.0)
+        self.z_max_spin.setStyleSheet(SPINBOX_STYLE)
+        self.z_max_spin.setMinimumWidth(90)
+        self.z_max_spin.setMaximumHeight(60)
+        self.z_max_spin.valueChanged.connect(self._on_z_changed)
+        cl.addWidget(self.z_max_spin)
+
         cl.addStretch()
         layout.addWidget(ctrl_row)
 
@@ -614,6 +677,13 @@ class FieldPanel(QFrame):
     def _on_range_changed(self, value):
         self.field.range_m = float(value)
         self.field.update()
+
+    def _on_z_changed(self, _):
+        # 复选框与两个数值框共用一个回调，取当前值下发到视图
+        self.field.set_height_window(
+            self.z_cb.isChecked(),
+            self.z_min_spin.value(),
+            self.z_max_spin.value())
 
     def set_checkboxes_enabled(self, enabled):
         for cb in self.checkboxes:
@@ -803,6 +873,7 @@ class MainWindow(QMainWindow):
 
         radar_ok = self.ros_node.lidar_connected()
         if radar_ok and self.ros_node.latest_lidar_points is not None:
+            self.field_panel.field.set_src(self.ros_node.lidar_source)
             self.field_panel.field.set_points(self.ros_node.latest_lidar_points)
 
         self.field_panel.set_checkboxes_enabled(radar_ok)

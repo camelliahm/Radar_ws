@@ -89,12 +89,12 @@ radar_spawn() {
     local prefix; prefix="$(env_prefix "$need_venv")"
     mkdir -p "$RUNDIR"
     local pidfile="$RUNDIR/$title.pid"
-    # \$\$ 交给子 shell 展开：exec 之后这个 PID 就是节点自己的 PID
-    local inner="echo \$\$ > '$pidfile'; $prefix; exec $cmd"
+    # 节点放后台并记录真实 PID（$!）；退出码可读，标签保留可回看日志
+    local inner="$prefix; $cmd & echo \$! > '$pidfile'; wait \$!; ret=\$?; \
+                echo; echo \"[$title] 退出码 \$ret，回车关闭这个标签\"; read -r"
 
     if [ "$USE_TERM" = "1" ] && command -v gnome-terminal >/dev/null 2>&1; then
-        if gnome-terminal --tab --title="$title" -- bash -c \
-            "$inner; echo; echo \"[$title] 已退出，回车关闭这个标签\"; read -r" 2>/dev/null; then
+        if gnome-terminal --tab --title="$title" -- bash -c "$inner" 2>/dev/null; then
             c_ok "$title → 新终端标签（pid 记在 $pidfile）"
             return 0
         fi
@@ -167,7 +167,9 @@ do_lidar() {
     radar_spawn lidar no ros2 launch livox_ros2_driver livox_lidar_launch.py
 }
 do_vision() {
-    radar_spawn vision no ros2 run radar_vision radar_detect_node --ros-args -r camera_image:=/image
+    # detect.cpp 用相对路径读 ./config/detect_params.yaml 和 model/，必须以 radar_core 为工作目录
+    radar_spawn vision no \
+        "cd '$WS/src/radar_core' && ros2 run radar_vision radar_detect_node --ros-args -r camera_image:=/image"
 }
 do_map() {
     radar_spawn map no ros2 run debug_map debug_map
